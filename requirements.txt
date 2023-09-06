@@ -1,0 +1,4 @@
+-r BLKARC-Module-API_TuDelft/requirements.txt
+
+bosdyn-client
+bosdyn-mission
