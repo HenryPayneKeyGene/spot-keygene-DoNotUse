@@ -1,5 +1,3 @@
-from typing import Literal
-
 import bosdyn
 import bosdyn.client
 import bosdyn.client.estop
@@ -30,13 +28,16 @@ class Spot:
         self.addr = addr
         self.name = name
 
-        self.state: Literal['startup', 'ready', 'shutdown'] = 'startup'
+        self.state: str = 'startup'
 
         bosdyn.client.util.setup_logging()
         self.sdk = bosdyn.client.create_standard_sdk('keygene-client')
         self.robot = self.sdk.create_robot(self.addr, self.name)
+        self.robot.logger.info("Starting up")
 
+        self.robot.logger.debug("Authenticating")
         bosdyn.client.util.authenticate(self.robot)
+        self.robot.logger.debug("Authentication OK")
 
         self.robot.start_time_sync()
 
@@ -52,13 +53,14 @@ class Spot:
         self._estop = EStop(self.estop_client, 15, f"estop-{self.name}")
 
         self.robot.logger.info("Spot initialized")
+        self.acquire()
+        self.robot.logger.info("Startup complete")
 
     def __del__(self):
         if self.state == 'ready':
             self.shutdown()
 
-    def startup(self):
-        self.robot.logger.info("Starting up...")
+    def acquire(self):
 
         self.robot.logger.debug("Waiting for time sync...")
         self.robot.time_sync.wait_for_sync()
@@ -68,10 +70,12 @@ class Spot:
         self.lease = self.lease_client.acquire()
         self.robot.logger.debug("Lease acquired.")
 
-        self.robot.logger.info("Startup complete")
 
     def shutdown(self):
         self.robot.logger.warn("Shutting down...")
+
+        if self.robot.is_powered_on():
+            self.power_off()
 
         if self.lease:
             self.robot.logger.debug("Releasing lease...")
@@ -102,9 +106,11 @@ class Spot:
         self._estop.stop()
 
     def stand(self):
+        self.robot.logger.info("Stand requested")
         bosdyn.client.robot_command.blocking_stand(self.command_client, timeout_sec=5)
         self.robot.logger.info("Standing")
 
     def sit(self):
+        self.robot.logger.info("Sit requested")
         bosdyn.client.robot_command.blocking_sit(self.command_client, timeout_sec=5)
         self.robot.logger.info("Sitting")
