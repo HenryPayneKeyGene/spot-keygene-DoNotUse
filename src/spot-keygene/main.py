@@ -14,8 +14,9 @@ def main():
     # if not blk_arc.connect(CONNECTION_TYPE):
     #     spot.robot.logger.error("could not connect to LIDAR")
     #     return
-    spot.power_on()
-    spot.stand()
-    sleep(3)
-    spot.sit()
+    # spot.power_on()
+    # spot.stand()
+    # sleep(3)
+    # spot.sit()
+    blk.start_capture()
     spot.shutdown()
