@@ -2,3 +2,6 @@
 
 bosdyn-client
 bosdyn-mission
+
+tqdm
+numpy

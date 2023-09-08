@@ -9,9 +9,14 @@ import bosdyn.client.robot_command
 import bosdyn.client.robot_state
 import bosdyn.client.util
 import bosdyn.client.world_object
+import bosdyn.client.map_processing
+
+from bosdyn.client.async_tasks import AsyncTasks
 
 from .estop import EStop
 from .util import AsyncRobotState
+
+import os
 
 
 class Spot:
@@ -81,12 +86,24 @@ class Spot:
                 bosdyn.client.docking.DockingClient.default_service_name
             )
         )
+        self.map_processing_client: bosdyn.client.map_processing.MapProcessingServiceClient = self.robot.ensure_client(
+            bosdyn.client.map_processing.MapProcessingServiceClient.default_service_name
+        )
 
         # self._estop = EStop(self.estop_client, 15, f"estop-{self.name}")
 
-        self.graph_nav_client.clear_graph()
+        client_metadata = (
+            bosdyn.client.recording.GraphNavRecordingServiceClient.make_client_metadata(
+                session_name=os.path.basename(os.getcwd()),
+                client_username=self.robot._current_user,
+                client_id="spot-keygene",
+                client_type="Python SDK",
+            )
+        )
 
-        self.robot_state_task = AsyncRobotState(self.state_client)
+        # self.robot_state_task = AsyncRobotState(self.state_client)
+        # self.async_tasks = AsyncTasks([self.robot_state_task])
+        # self.async_tasks.update()
 
         self.robot.logger.info("Spot initialized")
         self.acquire()
