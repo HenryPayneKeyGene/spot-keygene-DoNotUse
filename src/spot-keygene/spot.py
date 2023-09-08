@@ -1,22 +1,21 @@
+import os
+
 import bosdyn
 import bosdyn.client
 import bosdyn.client.docking
 import bosdyn.client.estop
 import bosdyn.client.graph_nav
 import bosdyn.client.lease
+import bosdyn.client.map_processing
+import bosdyn.client.power
 import bosdyn.client.recording
 import bosdyn.client.robot_command
 import bosdyn.client.robot_state
 import bosdyn.client.util
 import bosdyn.client.world_object
-import bosdyn.client.map_processing
 
-from bosdyn.client.async_tasks import AsyncTasks
-
-from .estop import EStop
-from .util import AsyncRobotState
-
-import os
+from .nav import GraphNavInterface
+from .recording import RecordingInterface
 
 
 class Spot:
@@ -35,7 +34,8 @@ class Spot:
 
     lease: bosdyn.client.lease.Lease
 
-    def __init__(self, addr, name):
+    def __init__(self, addr, name, download_path=os.getcwd(), upload_path=os.getcwd()):
+        self.powered_on = False
         self.addr = addr
         self.name = name
 
@@ -89,6 +89,9 @@ class Spot:
         self.map_processing_client: bosdyn.client.map_processing.MapProcessingServiceClient = self.robot.ensure_client(
             bosdyn.client.map_processing.MapProcessingServiceClient.default_service_name
         )
+        self.power_client: bosdyn.client.power.PowerClient = self.robot.ensure_client(
+            bosdyn.client.power.PowerClient.default_service_name
+        )
 
         # self._estop = EStop(self.estop_client, 15, f"estop-{self.name}")
 
@@ -100,6 +103,12 @@ class Spot:
                 client_type="Python SDK",
             )
         )
+        self.recording_interface = RecordingInterface(
+            self.robot, download_path, self.recording_client, self.graph_nav_client, self.map_processing_client,
+            client_metadata
+        )
+        self.graph_nav_interface = GraphNavInterface(self.robot, upload_path, self.command_client, self.state_client,
+                                                     self.graph_nav_client, self.power_client)
 
         # self.robot_state_task = AsyncRobotState(self.state_client)
         # self.async_tasks = AsyncTasks([self.robot_state_task])
@@ -146,15 +155,21 @@ class Spot:
         self.robot.logger.warn("Shutdown complete")
 
     def power_on(self):
+        if self.robot.is_powered_on():
+            return
         self.robot.logger.info("Powering on...")
         self.robot.power_on(timeout_sec=20)
         assert self.robot.is_powered_on(), "Failed to power on"
+        self.powered_on = True
         self.robot.logger.info("Power on complete")
 
     def power_off(self):
+        if not self.robot.is_powered_on():
+            return
         self.robot.logger.info("Powering off...")
         self.robot.power_off(timeout_sec=20)
         assert not self.robot.is_powered_on(), "Failed to power off"
+        self.powered_on = False
         self.robot.logger.info("Power off complete")
 
     def estop(self):

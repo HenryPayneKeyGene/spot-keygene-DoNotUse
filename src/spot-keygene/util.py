@@ -16,6 +16,16 @@ class AsyncRobotState(AsyncPeriodicQuery):
         return self._client.get_robot_state_async()
 
 
+def pretty_print_waypoints(waypoint_id, waypoint_name, short_code_to_count, localization_id):
+    short_code = id_to_short_code(waypoint_id)
+    if short_code is None or short_code_to_count[short_code] != 1:
+        short_code = '  '  # If the short code is not valid/unique, don't show it.
+
+    print(
+        "%s Waypoint name: %s id: %s short code: %s" %
+        ('->' if localization_id == waypoint_id else '  ', waypoint_name, waypoint_id, short_code))
+
+
 def update_waypoints_and_edges(graph, localization_id, do_print=True):
     """Update and print waypoint ids and edge ids."""
     name_to_id = dict()
@@ -74,3 +84,65 @@ def update_waypoints_and_edges(graph, localization_id, do_print=True):
                   f'(cost {edge.annotations.cost.value})')
 
     return name_to_id, edges
+
+
+def id_to_short_code(id):
+    """Convert a unique id to a 2 letter short code."""
+    tokens = id.split('-')
+    if len(tokens) > 2:
+        return '%c%c' % (tokens[0][0], tokens[1][0])
+    return None
+
+
+def find_unique_waypoint_id(short_code, graph, name_to_id):
+    """Convert either a 2 letter short code or an annotation name into the associated unique id."""
+    if graph is None:
+        print(
+            "Please list the waypoints in the map before trying to navigate to a specific one (Option #4)."
+        )
+        return
+
+    if len(short_code) != 2:
+        # Not a short code, check if it is an annotation name (instead of the waypoint id).
+        if short_code in name_to_id:
+            # Short code is a waypoint's annotation name. Check if it is paired with a unique waypoint id.
+            if name_to_id[short_code] is not None:
+                # Has an associated waypoint id!
+                return name_to_id[short_code]
+            else:
+                print(
+                    f"The waypoint name {short_code} is used for multiple different unique waypoints. Please use the "
+                    "waypoint id.")
+                return None
+        # Also not a waypoint annotation name, so we will operate under the assumption that it is a
+        # unique waypoint id.
+        return short_code
+
+    ret = short_code
+    for waypoint in graph.waypoints:
+        if short_code == id_to_short_code(waypoint.id):
+            if ret != short_code:
+                return short_code  # Multiple waypoints with same short code.
+            ret = waypoint.id
+    return ret
+
+
+def sort_waypoints_chrono(graph):
+    """Sort waypoints by time created."""
+    waypoint_to_timestamp = []
+    for waypoint in graph.waypoints:
+        # Determine the timestamp that this waypoint was created at.
+        timestamp = -1.0
+        try:
+            timestamp = waypoint.annotations.creation_time.seconds + waypoint.annotations.creation_time.nanos / 1e9
+        except Exception as _:
+            # Must be operating on an older graph nav map, since the creation_time is not
+            # available within the waypoint annotations message.
+            pass
+        waypoint_to_timestamp.append((waypoint.id, timestamp, waypoint.annotations.name))
+
+    # Sort the set of waypoints by their creation timestamp. If the creation timestamp is unavailable,
+    # fallback to sorting by annotation name.
+    waypoint_to_timestamp = sorted(waypoint_to_timestamp, key=lambda x: (x[1], x[2]))
+
+    return waypoint_to_timestamp

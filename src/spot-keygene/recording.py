@@ -7,8 +7,13 @@ import bosdyn.client
 import bosdyn.client.graph_nav
 import bosdyn.client.map_processing
 import bosdyn.client.recording
-from bosdyn.api.graph_nav import recording_pb2
+from bosdyn.api.geometry_pb2 import SE3Pose
+from bosdyn.api.graph_nav import map_pb2, map_processing_pb2, recording_pb2
+from bosdyn.client.math_helpers import Quat
+from google.protobuf import wrappers_pb2 as wrappers
 from tqdm import tqdm
+
+from .util import find_unique_waypoint_id, sort_waypoints_chrono, update_waypoints_and_edges
 
 
 class RecordingInterface:
@@ -21,7 +26,7 @@ class RecordingInterface:
             mp_client: bosdyn.client.map_processing.MapProcessingServiceClient,
             client_meta,
     ) -> None:
-        self.robot: bosdyn.client.Robot = robot
+        self.robot = robot
         self.download_path = download_path
         self.graph_nav_client = gn_client
         self.map_processing_client = mp_client
@@ -55,11 +60,11 @@ class RecordingInterface:
         # there is either a graph we are localized to or no graph. ok to start recording
         return True
 
-    def __clear_map(self):
+    def clear_map(self):
         """clear map on the robot"""
         return self.graph_nav_client.clear_graph()
 
-    def __start_recording(self):
+    def start_recording(self):
         """Start recording a map."""
         should_start = self.should_start_recording()
         if not should_start:
@@ -75,7 +80,7 @@ class RecordingInterface:
         except Exception as e:
             self.robot.logger.error(f"Start recording failed: {e}")
 
-    def __stop_recording(self):
+    def stop_recording(self):
         """Stop or pause recording a map."""
         first_iter = True
         while True:
@@ -94,14 +99,14 @@ class RecordingInterface:
                 self.robot.logger.error(f"Stop recording failed: {e}")
                 return
 
-    def __display_recording_status(self):
+    def display_recording_status(self):
         """Get recording service's status."""
 
         self.robot.logger.info(
             f"The recording service is {'on' if self.recording_client.get_record_status().is_recording else 'off'}."
         )
 
-    def __create_default_waypoint(self):
+    def create_default_waypoint(self):
         """Create a default waypoint at the current location."""
         resp = self.recording_client.create_waypoint(waypoint_name="default")
         if resp.status == recording_pb2.CreateWaypointResponse.STATUS_OK:
@@ -109,7 +114,7 @@ class RecordingInterface:
         else:
             self.robot.logger.error("Could not create default waypoint.")
 
-    def __download_full_graph(self):
+    def download_full_graph(self):
         """Download the graph and snapshots from the robot."""
         graph = self.graph_nav_client.download_graph()
         if graph is None:
@@ -176,7 +181,7 @@ class RecordingInterface:
         with open(os.path.join(filepath, filename), "wb+") as f:
             f.write(data)
 
-    def __update_ids(self, do_print=False):
+    def update_ids(self, do_print=False):
         graph = self.graph_nav_client.download_graph()
         if graph is None:
             self.robot.logger.warn("Empty graph.")
@@ -186,4 +191,107 @@ class RecordingInterface:
         loc_id = self.graph_nav_client.get_localization_state().localization.waypoint_id
 
         # update and print wp and ed
-        self.current_annotation_name_to_wp_id
+        self.current_annotation_name_to_wp_id, self.current_edges = update_waypoints_and_edges(graph, loc_id, do_print)
+
+    def list_graph_waypoint_and_edge_ids(self):
+        """List the waypoint ids and edge ids of the graph currently on the robot."""
+        self.update_ids(do_print=True)
+
+    def create_new_edge(self, *args):
+        """Create new edge between existing waypoints in map."""
+
+        if len(args[0]) != 2:
+            print("ERROR: Specify the two waypoints to connect (short code or annotation).")
+            return
+
+        self.update_ids(do_print=False)
+
+        from_id = find_unique_waypoint_id(args[0][0], self.current_graph,
+                                          self.current_annotation_name_to_wp_id)
+        to_id = find_unique_waypoint_id(args[0][1], self.current_graph,
+                                        self.current_annotation_name_to_wp_id)
+
+        print("Creating edge from {} to {}.".format(from_id, to_id))
+
+        from_wp = self.get_waypoint(from_id)
+        if from_wp is None:
+            return
+
+        to_wp = self.get_waypoint(to_id)
+        if to_wp is None:
+            return
+
+        # Get edge transform based on kinematic odometry
+        edge_transform = self.__get_transform(from_wp, to_wp)
+
+        # Define new edge
+        new_edge = map_pb2.Edge()
+        new_edge.id.from_waypoint = from_id
+        new_edge.id.to_waypoint = to_id
+        new_edge.from_tform_to.CopyFrom(edge_transform)
+
+        self.robot.logger.info("edge transform =", new_edge.from_tform_to)
+
+        # Send request to add edge to map
+        self.recording_client.create_edge(edge=new_edge)
+
+    def create_loop(self):
+        """Create edge from last waypoint to first waypoint."""
+
+        self.update_ids(do_print=False)
+
+        if len(self.current_graph.waypoints) < 2:
+            self._add_message(
+                "Graph contains {} waypoints -- at least two are needed to create loop.".format(
+                    len(self.current_graph.waypoints)))
+            return False
+
+        sorted_waypoints = sort_waypoints_chrono(self.current_graph)
+        edge_waypoints = [sorted_waypoints[-1][0], sorted_waypoints[0][0]]
+
+        self.create_new_edge(edge_waypoints)
+
+    def auto_close_loops(self, close_fiducial_loops, close_odometry_loops):
+        """Automatically find and close all loops in the graph."""
+        response = self.map_processing_client.process_topology(
+            params=map_processing_pb2.ProcessTopologyRequest.Params(
+                do_fiducial_loop_closure=wrappers.BoolValue(value=close_fiducial_loops),
+                do_odometry_loop_closure=wrappers.BoolValue(value=close_odometry_loops)),
+            modify_map_on_server=True)
+        self.robot.logger.info(f"Created {len(response.new_subgraph.edges)} new edge(s).")
+
+    def optimize_anchoring(self):
+        """
+        Call anchoring optimization on the server, producing a globally optimal reference frame for waypoints to 
+        be expressed in.
+        """
+        response = self.map_processing_client.process_anchoring(
+            params=map_processing_pb2.ProcessAnchoringRequest.Params(),
+            modify_anchoring_on_server=True, stream_intermediate_results=False)
+        if response.status == map_processing_pb2.ProcessAnchoringResponse.STATUS_OK:
+            self.robot.logger.info("Optimized anchoring after {} iteration(s).".format(response.iteration))
+        else:
+            self.robot.logger.error(f"Error optimizing {response}")
+
+    def get_waypoint(self, waypoint_id):
+        """Get waypoint from graph."""
+        if self.current_graph is None:
+            self.current_graph = self.graph_nav_client.download_graph()
+
+        for wp in self.current_graph.waypoints:
+            if wp.id == waypoint_id:
+                return wp
+
+    @staticmethod
+    def __get_transform(from_wp, to_wp):
+        """Get transform between two waypoints."""
+        from_se3 = from_wp.waypoint_tform_ko
+        from_tf = SE3Pose(
+            from_se3.position.x, from_se3.position.y, from_se3.position.z,
+            Quat(w=from_se3.rotation.w, x=from_se3.rotation.x, y=from_se3.rotation.y, z=from_se3.rotation.z))
+
+        to_se3 = to_wp.waypoint_tform_ko
+        to_tf = SE3Pose(
+            to_se3.position.x, to_se3.position.y, to_se3.position.z,
+            Quat(w=to_se3.rotation.w, x=to_se3.rotation.x, y=to_se3.rotation.y, z=to_se3.rotation.z))
+        return from_tf.mult(to_tf.inverse())
