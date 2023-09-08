@@ -13,13 +13,13 @@ from tqdm import tqdm
 
 class RecordingInterface:
     def __init__(
-        self,
-        robot: bosdyn.client.Robot,
-        download_path: str,
-        rec_client: bosdyn.client.recording.GraphNavRecordingServiceClient,
-        gn_client: bosdyn.client.graph_nav.GraphNavClient,
-        mp_client: bosdyn.client.map_processing.MapProcessingServiceClient,
-        client_meta,
+            self,
+            robot: bosdyn.client.Robot,
+            download_path: str,
+            rec_client: bosdyn.client.recording.GraphNavRecordingServiceClient,
+            gn_client: bosdyn.client.graph_nav.GraphNavClient,
+            mp_client: bosdyn.client.map_processing.MapProcessingServiceClient,
+            client_meta,
     ) -> None:
         self.robot: bosdyn.client.Robot = robot
         self.download_path = download_path
