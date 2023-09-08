@@ -1,12 +1,17 @@
 import bosdyn
 import bosdyn.client
+import bosdyn.client.docking
 import bosdyn.client.estop
+import bosdyn.client.graph_nav
 import bosdyn.client.lease
+import bosdyn.client.recording
 import bosdyn.client.robot_command
 import bosdyn.client.robot_state
 import bosdyn.client.util
+import bosdyn.client.world_object
 
 from .estop import EStop
+from .util import AsyncRobotState
 
 
 class Spot:
@@ -15,6 +20,7 @@ class Spot:
 
     This class is a wrapper around the Boston Dynamics SDK.
     """
+
     robot: bosdyn.client.Robot
     sdk: bosdyn.client.Sdk
 
@@ -28,10 +34,10 @@ class Spot:
         self.addr = addr
         self.name = name
 
-        self.state: str = 'startup'
+        self.state: str = "startup"
 
         bosdyn.client.util.setup_logging()
-        self.sdk = bosdyn.client.create_standard_sdk('keygene-client')
+        self.sdk = bosdyn.client.create_standard_sdk("keygene-client")
         self.robot = self.sdk.create_robot(self.addr, self.name)
         self.robot.logger.info("Starting up")
 
@@ -41,35 +47,68 @@ class Spot:
 
         self.robot.start_time_sync()
 
-        self.command_client = self.robot.ensure_client(
-            bosdyn.client.robot_command.RobotCommandClient.default_service_name)
-        self.state_client = self.robot.ensure_client(
-            bosdyn.client.robot_state.RobotStateClient.default_service_name)
-        self.lease_client = self.robot.ensure_client(
-            bosdyn.client.lease.LeaseClient.default_service_name)
-        self.estop_client = self.robot.ensure_client(
-            bosdyn.client.estop.EstopClient.default_service_name)
+        self.command_client: bosdyn.client.robot_command.RobotCommandClient = (
+            self.robot.ensure_client(
+                bosdyn.client.robot_command.RobotCommandClient.default_service_name
+            )
+        )
+        self.state_client: bosdyn.client.robot_state.RobotStateClient = (
+            self.robot.ensure_client(
+                bosdyn.client.robot_state.RobotStateClient.default_service_name
+            )
+        )
+        self.lease_client: bosdyn.client.lease.LeaseClient = self.robot.ensure_client(
+            bosdyn.client.lease.LeaseClient.default_service_name
+        )
+        self.estop_client: bosdyn.client.estop.EstopClient = self.robot.ensure_client(
+            bosdyn.client.estop.EstopClient.default_service_name
+        )
+        self.graph_nav_client: bosdyn.client.graph_nav.GraphNavClient = (
+            self.robot.ensure_client(
+                bosdyn.client.graph_nav.GraphNavClient.default_service_name
+            )
+        )
+        self.recording_client: bosdyn.client.recording.GraphNavRecordingServiceClient = self.robot.ensure_client(
+            bosdyn.client.recording.GraphNavRecordingServiceClient.default_service_name
+        )
+        self.world_object_client: bosdyn.client.world_object.WorldObjectClient = (
+            self.robot.ensure_client(
+                bosdyn.client.world_object.WorldObjectClient.default_service_name
+            )
+        )
+        self.docking_client: bosdyn.client.docking.DockingClient = (
+            self.robot.ensure_client(
+                bosdyn.client.docking.DockingClient.default_service_name
+            )
+        )
 
-        self._estop = EStop(self.estop_client, 15, f"estop-{self.name}")
+        # self._estop = EStop(self.estop_client, 15, f"estop-{self.name}")
+
+        self.graph_nav_client.clear_graph()
+
+        self.robot_state_task = AsyncRobotState(self.state_client)
 
         self.robot.logger.info("Spot initialized")
         self.acquire()
         self.robot.logger.info("Startup complete")
 
     def __del__(self):
-        if self.state == 'ready':
+        if self.state == "ready":
             self.shutdown()
 
     def acquire(self):
-
         self.robot.logger.debug("Waiting for time sync...")
         self.robot.time_sync.wait_for_sync()
         self.robot.logger.debug("Time sync OK")
 
         self.robot.logger.debug("Acquiring lease...")
         self.lease = self.lease_client.acquire()
-        self.robot.logger.debug("Lease acquired.")
+        self.robot.logger.debug(f"Lease acquired.")
 
+        if not hasattr(self, "_estop"):
+            self.robot.logger.warn(
+                "EStop not configured -- please use an external EStop client."
+            )
 
     def shutdown(self):
         self.robot.logger.warn("Shutting down...")
@@ -86,7 +125,7 @@ class Spot:
         self.robot.time_sync.stop()
         self.robot.logger.debug("Time sync stopped")
 
-        self.state = 'shutdown'
+        self.state = "shutdown"
         self.robot.logger.warn("Shutdown complete")
 
     def power_on(self):
