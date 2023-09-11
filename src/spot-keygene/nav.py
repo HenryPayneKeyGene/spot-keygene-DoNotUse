@@ -7,6 +7,7 @@ import logging
 import math
 import time
 
+import bosdyn.mission.client
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
 from bosdyn.api.mission import mission_pb2, nodes_pb2
 from bosdyn.client import Robot
@@ -18,7 +19,6 @@ from bosdyn.client.math_helpers import Quat, SE3Pose
 from bosdyn.client.power import PowerClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
-import bosdyn.mission.client
 
 from .util import find_unique_waypoint_id, update_waypoints_and_edges
 

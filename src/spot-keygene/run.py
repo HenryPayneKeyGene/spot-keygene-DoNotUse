@@ -3,10 +3,21 @@
 #  You should have received a copy of the MIT License with this file. If not, please visit:
 #  https://opensource.org/licenses/MIT
 
+"""
+This module contains the main entry point for the Spot Keygene application.
+"""
+import curses
 import logging
 import os
+import traceback
+from xmlrpc.client import ResponseError
+
+from bosdyn.client import RpcError
+from bosdyn.client.lease import LeaseKeepAlive
+from bosdyn.client.util import setup_logging
 
 from .blk import BLK
+from .recording import RecorderInterface
 from .spot import Spot
 from .util import countdown
 
@@ -26,33 +37,30 @@ class Run:
     def __del__(self):
         if hasattr(self, "robot"):
             self.robot.shutdown()
-        if hasattr(self, "lidar"):    
+        if hasattr(self, "lidar"):
             self.lidar.shutdown()
 
     def record_mission(self):
-        # disable estop and enable manual control
-        self.robot.release_estop()
-        self.robot.release()
+        recorder = RecorderInterface(self.robot)
+        stream_handler = setup_logging()
+        with LeaseKeepAlive(self.robot.lease_client, must_acquire=True, return_at_exit=True) as lease_keep_alive:
+            try:
+                recorder.start(lease_keep_alive)
+            except (ResponseError, RpcError) as err:
+                self.logger.error('Failed to initialize robot communication: %s', err)
+                return False
 
-        # wait for fiducial
-        self.logger.info(f"Waiting for fiducial...")
-        self.robot.recording_interface.wait_for_fiducial()
-        self.starting_fiducial = self.robot.recording_interface.get_fiducial_objects()[0]
-
-        # start recording
-        self.logger.info("Starting recording...")
-        countdown(5)
-        self.robot.recording_interface.start_recording()
-
-        self.logger.info("Recording... use the tablet to drive around the environment.")
-        input("Press enter to stop recording...")
-
-        # stop recording and save
-        self.logger.info("Stopping recording...")
-        self.robot.recording_interface.generate_mission()
-
-        # power off
-        self.robot.power_off()
+            try:
+                # Prevent curses from introducing a 1-second delay for ESC key
+                os.environ.setdefault('ESCDELAY', '0')
+                # Run recorder interface in curses mode, then restore terminal config.
+                curses.wrapper(recorder.drive)
+            except Exception as e:
+                self.logger.error('Mission recorder has thrown an error: %r', e)
+                self.logger.error(traceback.format_exc())
+            finally:
+                # Restore stream handler after curses mode.
+                self.logger.addHandler(stream_handler)
 
     def autowalk(self, mission_file):
         """Walk around the environment and collect data."""

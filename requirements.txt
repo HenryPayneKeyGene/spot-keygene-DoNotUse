@@ -4,4 +4,4 @@ bosdyn-client >= 3.1
 bosdyn-mission >= 3.1
 
 tqdm
-numpy
+windows-curses ; sys_platform == 'win32'

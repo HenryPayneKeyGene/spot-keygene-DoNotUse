@@ -3,7 +3,6 @@
 #  You should have received a copy of the MIT License with this file. If not, please visit:
 #  https://opensource.org/licenses/MIT
 
-import threading
 import time
 
 import bosdyn
@@ -11,6 +10,7 @@ import bosdyn.api.robot_state_pb2 as robot_state_proto
 import bosdyn.api.spot.robot_command_pb2 as spot_command_pb2
 import bosdyn.client
 import bosdyn.mission.client
+from bosdyn.api import world_object_pb2
 from bosdyn.client import ResponseError, RpcError
 from bosdyn.client.async_tasks import AsyncTasks
 from bosdyn.client.docking import DockingClient
@@ -21,16 +21,12 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.map_processing import MapProcessingServiceClient as MapClient
 from bosdyn.client.power import PowerClient
 from bosdyn.client.recording import GraphNavRecordingServiceClient as RecordingClient
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient, blocking_sit, blocking_stand
+from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.client.time_sync import TimeSyncError
 from bosdyn.client.util import setup_logging
 from bosdyn.client.world_object import WorldObjectClient
-from bosdyn.util import duration_str, secs_to_hms
 
 from .globals import VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
-from .nav import GraphNavInterface
-from .recording import RecorderInterface
 from .util import AsyncRobotState
 
 
@@ -54,6 +50,7 @@ class Spot:
         self.powered_on = False
         self.addr = config["addr"]
         self.name = config["name"]
+        self.download_path = config["download_path"]
 
         self.state: str = "startup"
 
@@ -82,16 +79,6 @@ class Spot:
         self.power_client: PowerClient = self.robot.ensure_client(PowerClient.default_service_name)
         # self.mission_client = self.robot.ensure_client(bosdyn.mission.client.MissionClient.default_service_name)
 
-        # initialize interfaces
-
-        self.recording_interface = RecorderInterface(self.robot, config["download_path"], self.lease_client,
-                                                      self.map_processing_client, self.power_client,
-                                                     self.state_client, self.command_client, self.world_object_client,
-                                                     self.recording_client, self.graph_nav_client)
-        # self.graph_nav_interface = GraphNavInterface(self.robot, config["upload_path"], self.command_client,
-        #                                              self.state_client, self.graph_nav_client, self.power_client,
-        #                                              self.mission_client)
-
         try:
             self.estop_endpoint = EstopEndpoint(self.estop_client, 'kg-estop', 9.0)
         except Exception as _:
@@ -99,13 +86,12 @@ class Spot:
             self.estop_endpoint = None
 
         self.robot_state_task = AsyncRobotState(self.state_client)
-        self._async_tasks = AsyncTasks([self.robot_state_task])
-        self._lock = threading.Lock()
+        self.async_tasks = AsyncTasks([self.robot_state_task])
 
         if self.estop_endpoint is not None:
             self.estop_endpoint.force_simple_setup(
             )  # Set this endpoint as the robot's sole estop.
-        
+
         self.estop_endpoint.allow()
 
         self.estop_keep_alive = None
@@ -177,19 +163,17 @@ class Spot:
         self.powered_on = False
         self.logger.info("Power off complete")
 
-    def release_estop(self):
-        if self.estop_client is not None and self.estop_endpoint is not None:
-            if self.estop_keep_alive:
-                self._try_grpc("stopping estop", self.estop_keep_alive.stop)
-                self.estop_keep_alive.shutdown()
-                self.estop_keep_alive = None
-
-    def estop(self):
+    def toggle_estop(self):
+        """toggle estop on/off. Initial state is ON"""
         if self.estop_client is not None and self.estop_endpoint is not None:
             if not self.estop_keep_alive:
                 self.estop_keep_alive = EstopKeepAlive(self.estop_endpoint)
+            else:
+                self._try_grpc('stopping estop', self.estop_keep_alive.stop)
+                self.estop_keep_alive.shutdown()
+                self.estop_keep_alive = None
 
-    def _toggle_time_sync(self):
+    def toggle_time_sync(self):
         if self.robot.time_sync.stopped:
             self.robot.time_sync.start()
         else:
@@ -202,16 +186,6 @@ class Spot:
             self.logger.error(f"Failed {desc}: {err}")
             return None
 
-    def stand(self):
-        self.logger.info("Stand requested")
-        blocking_stand(self.command_client, timeout_sec=5)
-        self.logger.info("Standing")
-
-    def sit(self):
-        self.logger.info("Sit requested")
-        blocking_sit(self.command_client, timeout_sec=5)
-        self.logger.info("Sitting")
-
     def _startrobot_command(self, desc, command_proto, end_time_secs=None):
 
         def _start_command():
@@ -220,34 +194,34 @@ class Spot:
 
         self._try_grpc(desc, _start_command)
 
-    def _self_right(self):
+    def self_right(self):
         self._startrobot_command('self_right', RobotCommandBuilder.selfright_command())
 
-    def _sit(self):
+    def sit(self):
         self._startrobot_command('sit', RobotCommandBuilder.synchro_sit_command())
 
-    def _stand(self):
+    def stand(self):
         self._startrobot_command('stand', RobotCommandBuilder.synchro_stand_command())
 
-    def _move_forward(self):
+    def move_forward(self):
         self._velocity_cmd_helper('move_forward', v_x=VELOCITY_BASE_SPEED)
 
-    def _move_backward(self):
+    def move_backward(self):
         self._velocity_cmd_helper('move_backward', v_x=-VELOCITY_BASE_SPEED)
 
-    def _strafe_left(self):
+    def strafe_left(self):
         self._velocity_cmd_helper('strafe_left', v_y=VELOCITY_BASE_SPEED)
 
-    def _strafe_right(self):
+    def strafe_right(self):
         self._velocity_cmd_helper('strafe_right', v_y=-VELOCITY_BASE_SPEED)
 
-    def _turn_left(self):
+    def turn_left(self):
         self._velocity_cmd_helper('turn_left', v_rot=VELOCITY_BASE_ANGULAR)
 
-    def _turn_right(self):
+    def turn_right(self):
         self._velocity_cmd_helper('turn_right', v_rot=-VELOCITY_BASE_ANGULAR)
 
-    def _stop(self):
+    def stop(self):
         self._startrobot_command('stop', RobotCommandBuilder.stop_command())
 
     def _velocity_cmd_helper(self, desc='', v_x=0.0, v_y=0.0, v_rot=0.0):
@@ -255,7 +229,7 @@ class Spot:
             desc, RobotCommandBuilder.synchro_velocity_command(v_x=v_x, v_y=v_y, v_rot=v_rot),
             end_time_secs=time.time() + VELOCITY_CMD_DURATION)
 
-    def _return_to_origin(self):
+    def return_to_origin(self):
         self._startrobot_command(
             'fwd_and_rotate',
             RobotCommandBuilder.synchro_se2_trajectory_point_command(
@@ -263,7 +237,7 @@ class Spot:
                 body_height=0.0, locomotion_hint=spot_command_pb2.HINT_SPEED_SELECT_TROT),
             end_time_secs=time.time() + 20)
 
-    def _toggle_power(self):
+    def toggle_power(self):
         power_state = self._power_state()
         if power_state is None:
             self.logger.error('Could not toggle power because power state is unknown')
@@ -272,12 +246,12 @@ class Spot:
         if power_state == robot_state_proto.PowerState.STATE_OFF:
             self._try_grpc("powering-on", self._request_power_on)
         else:
-            self._try_grpc("powering-off", self._safe_power_off)
+            self._try_grpc("powering-off", self.safe_power_off)
 
     def _request_power_on(self):
         bosdyn.client.power.power_on(self.power_client)
 
-    def _safe_power_off(self):
+    def safe_power_off(self):
         self._startrobot_command('safe_power_off', RobotCommandBuilder.safe_power_off_command())
 
     def _power_state(self):
@@ -286,92 +260,9 @@ class Spot:
             return None
         return state.power_state.motor_power_state
 
-    @staticmethod
-    def _lease_str(lease_keep_alive):
-        alive = 'RUNNING' if lease_keep_alive.is_alive() else 'STOPPED'
-        lease_proto = lease_keep_alive.lease_wallet.get_lease_state().lease_original.lease_proto
-        lease = f'{lease_proto.resource}:{lease_proto.sequence}'
-        return f'Lease {lease} THREAD:{alive}'
-
-    def _power_state_str(self):
-        power_state = self._power_state()
-        if power_state is None:
-            return ''
-        state_str = robot_state_proto.PowerState.MotorPowerState.Name(power_state)
-        return f'Power: {state_str[6:]}'  # get rid of STATE_ prefix
-
-    def _estop_str(self):
-        if not self.estop_client:
-            thread_status = 'NOT ESTOP'
-        else:
-            thread_status = 'RUNNING' if self.estop_keep_alive else 'STOPPED'
-        estop_status = '??'
-        state = self.robot_state
-        if state:
-            for estop_state in state.estop_states:
-                if estop_state.type == estop_state.TYPE_SOFTWARE:
-                    estop_status = estop_state.State.Name(estop_state.state)[6:]  # s/STATE_//
-                    break
-        return f'Estop {estop_status} (thread: {thread_status})'
-
-    def _time_sync_str(self):
-        if not self.robot.time_sync:
-            return 'Time sync: (none)'
-        if self.robot.time_sync.stopped:
-            status = 'STOPPED'
-            exception = self.robot.time_sync.thread_exception
-            if exception:
-                status = f'{status} Exception: {exception}'
-        else:
-            status = 'RUNNING'
-        try:
-            skew = self.robot.time_sync.getrobot_clock_skew()
-            if skew:
-                skew_str = 'offset={}'.format(duration_str(skew))
-            else:
-                skew_str = "(Skew undetermined)"
-        except (TimeSyncError, RpcError) as err:
-            skew_str = '({})'.format(err)
-        return 'Time sync: {} {}'.format(status, skew_str)
-
-    def _waypoint_str(self):
-        state = self.graph_nav_client.get_localization_state()
-        try:
-            self._waypoint_id = state.localization.waypoint_id
-            if self._waypoint_id == '':
-                self._waypoint_id = 'NONE'
-
-        except:
-            self._waypoint_id = 'ERROR'
-
-        if self.recording_interface.recording and self._waypoint_id != 'NONE' and self._waypoint_id != 'ERROR':
-            if self._waypoint_id not in self.recording_interface.desert_flag:
-                self.recording_interface.desert_flag[self._waypoint_id] = self.recording_interface.desert_flag
-            return f'Current waypoint: {self._waypoint_id} [ RECORDING ]'
-
-        return f'Current waypoint: {self._waypoint_id}'
-
-    def _fiducial_str(self):
-        return f'Visible fiducials: {str(self.recording_interface.count_visible_fiducials())}'
-
-    def _desert_str(self):
-        if self.recording_interface.desert_mode:
-            return '[ FEATURE DESERT MODE ]'
-        else:
-            return ''
-
-    def _battery_str(self):
-        if not self.robot_state:
-            return ''
-        battery_state = self.robot_state.battery_states[0]
-        status = battery_state.Status.Name(battery_state.status)
-        status = status[7:]  # get rid of STATUS_ prefix
-        if battery_state.charge_percentage.value:
-            bar_len = int(battery_state.charge_percentage.value) // 10
-            bat_bar = f'|{"=" * bar_len}{" " * (10 - bar_len)}|'
-        else:
-            bat_bar = ''
-        time_left = ''
-        if battery_state.estimated_runtime:
-            time_left = f' ({secs_to_hms(battery_state.estimated_runtime.seconds)})'
-        return f'Battery: {status}{bat_bar}{time_left}'
+    def count_visible_fiducials(self):
+        """Return number of fiducials visible to robot."""
+        request_fiducials = [world_object_pb2.WORLD_OBJECT_APRILTAG]
+        fiducial_objects = self.world_object_client.list_world_objects(
+            object_type=request_fiducials).world_objects
+        return len(fiducial_objects)
