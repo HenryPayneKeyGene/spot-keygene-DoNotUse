@@ -699,7 +699,7 @@ class RecorderInterface:
         """Make scan node."""
         # this is actually a sleep node. scan is implemented in the mission.
         loc = nodes_pb2.Node()
-        loc.name = 'scan' + waypoint_id
+        loc.name = 'scan'
 
         impl = nodes_pb2.Sleep(seconds=10)
 
