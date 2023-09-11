@@ -5,7 +5,6 @@
 
 import logging
 import os
-import time
 
 from .blk import BLK
 from .spot import Spot
@@ -29,15 +28,9 @@ class Run:
         self.lidar.shutdown()
 
     def record_mission(self):
-        # acquire lease
-        self.robot.acquire()
-
-        # disable estop
+        # disable estop and enable manual control
         self.robot.release_estop()
-
-        # power on and stand
-        self.robot.power_on()
-        self.robot.stand()
+        self.robot.release()
 
         # wait for fiducial
         self.logger.info(f"Waiting for fiducial...")
@@ -49,8 +42,8 @@ class Run:
         countdown(5)
         self.robot.recording_interface.start_recording()
 
-        # TODO wasd control
-        time.sleep(5)
+        self.logger.info("Recording... use the tablet to drive around the environment.")
+        input("Press enter to stop recording...")
 
         # stop recording and save
         self.logger.info("Stopping recording...")
