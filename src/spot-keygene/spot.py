@@ -139,8 +139,9 @@ class Spot:
         if self.estop_keep_alive:
             self.estop_keep_alive.shutdown()
 
+        self.logger.info("Stopping time sync...")
         self.robot.time_sync.stop()
-        self.logger.debug("Time sync stopped")
+        self.logger.info("Time sync stopped")
 
         self.state = "shutdown"
         self.logger.warn("Shutdown complete")
