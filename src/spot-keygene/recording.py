@@ -10,7 +10,6 @@ import threading
 import time
 
 import bosdyn.api.robot_state_pb2 as robot_state_proto
-from bosdyn.api import basic_command_pb2, mobility_command_pb2, robot_command_pb2, synchronized_command_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, map_processing_pb2, recording_pb2
 from bosdyn.api.mission import nodes_pb2
 from bosdyn.client import RpcError
@@ -698,50 +697,14 @@ class RecorderInterface:
     @staticmethod
     def _make_scan_node(waypoint_id):
         """Make scan node."""
-        # this is actually a sequence node
-        # sequence:
-        #   - stand
-        #   - RemoteGrpc (start scan)
-        #   - sleep 10
+        # this is actually a sleep node. scan is implemented in the mission.
+        loc = nodes_pb2.Node()
+        loc.name = 'scan' + waypoint_id
 
-        request = basic_command_pb2.StandCommand.Request()
-        mobility_command = mobility_command_pb2.MobilityCommand.Request(stand_request=request)
-        robot_command = robot_command_pb2.RobotCommand(mobility_command=mobility_command)
-        stand = nodes_pb2.BosdynRobotCommand(service_name='robot-command',
+        impl = nodes_pb2.Sleep(seconds=10)
 
-                                             host='localhost',
-                                             command=robot_command)
-
-        stand_mission = nodes_pb2.Node(name='stand')
-        stand_mission.impl.Pack(stand)
-
-        # TODO create BLK-ARC remote service
-        # start_scan = nodes_pb2.Node()
-        # start_scan.name = 'start scan'
-        # start_scan.impl.Pack(
-        #     nodes_pb2.RemoteGrpc(
-        #         service_name='bosdyn.api.GraphNavRecordingService',
-        #         method_name='StartRecording',
-        #         request=recording_pb2.StartRecordingRequest(
-        #             recording_environment=recording_pb2.RecordingEnvironment(
-        #                 waypoint_env=recording_pb2.WaypointEnvironment(
-        #                     waypoint_id=waypoint_id)))))
-
-        sleep = nodes_pb2.Node()
-        sleep.name = 'sleep'
-        sleep.impl.Pack(nodes_pb2.Sleep(seconds=10))
-
-        sleep_mission = nodes_pb2.Node(name='sleep')
-        sleep_mission.impl.Pack(sleep)
-
-        sequence = nodes_pb2.Sequence()
-        sequence.children.add().CopyFrom(stand_mission)
-        sequence.children.add().CopyFrom(sleep_mission)
-
-        mission = nodes_pb2.Node()
-        mission.name = 'scan' + waypoint_id
-        mission.impl.Pack(sequence)
-        return mission
+        loc.impl.Pack(impl)
+        return loc
 
     @staticmethod
     def _make_initialize_node():

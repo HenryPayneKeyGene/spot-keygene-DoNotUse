@@ -61,6 +61,7 @@ class Run:
             finally:
                 # Restore stream handler after curses mode.
                 self.logger.addHandler(stream_handler)
+        self.logger.info('Mission recorder has exited.')
 
     def autowalk(self, mission_file):
         """Walk around the environment and collect data."""
