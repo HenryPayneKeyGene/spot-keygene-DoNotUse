@@ -4,11 +4,40 @@
 #  https://opensource.org/licenses/MIT
 
 import logging
+import signal
+import time
 
 from bosdyn.client.async_tasks import AsyncPeriodicQuery
 from bosdyn.client.robot_state import RobotStateClient
 
 LOGGER = logging.getLogger()
+
+
+class ExitCheck:
+    """A class to help exiting a loop, also capturing SIGTERM to exit the loop."""
+
+    def __init__(self):
+        self._kill_now = False
+        signal.signal(signal.SIGTERM, self._sigterm_handler)
+        signal.signal(signal.SIGINT, self._sigterm_handler)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _type, _value, _traceback):
+        return False
+
+    def _sigterm_handler(self, _signum, _frame):
+        self._kill_now = True
+
+    def request_exit(self):
+        """Manually trigger an exit (rather than sigterm/sigint)."""
+        self._kill_now = True
+
+    @property
+    def kill_now(self):
+        """Return the status of the exit checker indicating if it should exit."""
+        return self._kill_now
 
 
 class AsyncRobotState(AsyncPeriodicQuery):
@@ -31,7 +60,7 @@ def pretty_print_waypoints(waypoint_id, waypoint_name, short_code_to_count, loca
         ('->' if localization_id == waypoint_id else '  ', waypoint_name, waypoint_id, short_code))
 
 
-def update_waypoints_and_edges(graph, localization_id, do_print=True):
+def update_waypoints_and_edges(graph, localization_id, logger=None):
     """Update and print waypoint ids and edge ids."""
     name_to_id = dict()
     edges = dict()
@@ -73,8 +102,8 @@ def update_waypoints_and_edges(graph, localization_id, do_print=True):
 
     # Print out the waypoints name, id, and short code in an ordered sorted by the timestamp from
     # when the waypoint was created.
-    if do_print:
-        print(f'{len(graph.waypoints):d} waypoints:')
+    if logger:
+        logger.debug(f'{len(graph.waypoints):d} waypoints:')
         for waypoint in waypoint_to_timestamp:
             pretty_print_waypoints(waypoint[0], waypoint[2], short_code_to_count, localization_id)
 
@@ -84,9 +113,9 @@ def update_waypoints_and_edges(graph, localization_id, do_print=True):
                 edges[edge.id.to_waypoint].append(edge.id.from_waypoint)
         else:
             edges[edge.id.to_waypoint] = [edge.id.from_waypoint]
-        if do_print:
-            print(f'(Edge) from waypoint {edge.id.from_waypoint} to waypoint {edge.id.to_waypoint} '
-                  f'(cost {edge.annotations.cost.value})')
+        if logger:
+            logger.debug(f'(Edge) from waypoint {edge.id.from_waypoint} to waypoint {edge.id.to_waypoint} '
+                         f'(cost {edge.annotations.cost.value})')
 
     return name_to_id, edges
 
@@ -151,3 +180,12 @@ def sort_waypoints_chrono(graph):
     waypoint_to_timestamp = sorted(waypoint_to_timestamp, key=lambda x: (x[1], x[2]))
 
     return waypoint_to_timestamp
+
+
+def countdown(length):
+    """Print sleep countdown"""
+
+    for i in range(length, 0, -1):
+        print(i, end=' ', flush=True)
+        time.sleep(1)
+    print(0)
