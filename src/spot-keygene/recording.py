@@ -42,7 +42,7 @@ def write_bytes(filepath, filename, data):
 class RecorderInterface(object):
     """A curses interface for recording robot missions."""
 
-    def __init__(self, robot, download_filepath, lease_client: LeaseClient, estop_client: EstopClient,
+    def __init__(self, robot, download_filepath, lease_client: LeaseClient,
                  map_client: MapProcessingServiceClient, power_client: PowerClient, state_client: RobotStateClient,
                  cmd_client: RobotCommandClient, world_object_client: WorldObjectClient,
                  rec_client: GraphNavRecordingServiceClient, graph_nav_client: GraphNavClient):
@@ -86,51 +86,11 @@ class RecorderInterface(object):
         self._graph = None
         self._all_graph_wps_in_order = []
 
-        self._command_dictionary = {
-            27: self._stop,  # ESC key
-            ord('\t'): self._quit_program,
-            ord('T'): self._toggle_time_sync,
-            ord(' '): self._toggle_estop,
-            ord('r'): self._self_right,
-            ord('P'): self._toggle_power,
-            ord('v'): self._sit,
-            ord('f'): self._stand,
-            ord('w'): self._move_forward,
-            ord('s'): self._move_backward,
-            ord('a'): self._strafe_left,
-            ord('c'): self._auto_close_loops,
-            ord('d'): self._strafe_right,
-            ord('q'): self._turn_left,
-            ord('e'): self._turn_right,
-            ord('m'): self.start_recording,
-            ord('l'): self._relocalize,
-            ord('z'): self._enter_desert,
-            ord('x'): self._exit_desert,
-            ord('g'): self.generate_mission
-        }
         self._locked_messages = ['', '', '']  # string: displayed message for user
         self._exit_check = None
 
         # Stuff that is set in start()
         self._robot_id = None
-
-    def start(self, lease_keep_alive):
-        """Begin communication with the robot."""
-        self._lease_keep_alive = lease_keep_alive
-        self._robot_id = self._robot.get_id()
-
-        # Clear existing graph nav map
-        self._graph_nav_client.clear_graph()
-
-    def shutdown(self):
-        """Release control of robot as gracefully as possible."""
-        self.logger.info("Shutting down WasdInterface.")
-        if self._estop_keepalive:
-            # This stops the check-in thread but does not stop the robot.
-            self._estop_keepalive.shutdown()
-
-    def __del__(self):
-        self.shutdown()
 
     # def flush_and_estop_buffer(self, stdscr):
     #     """Manually flush the curses input buffer but trigger any estop requests (space)"""
@@ -268,7 +228,7 @@ class RecorderInterface(object):
         request_fiducials = [world_object_pb2.WORLD_OBJECT_APRILTAG]
         fiducial_objects = self._world_object_client.list_world_objects(
             object_type=request_fiducials).world_objects
-        self.logger.info("Fiducial objects: " + str(fiducial_objects))
+        # self.logger.info("Fiducial objects: " + str(fiducial_objects))
 
         if len(fiducial_objects) > 0:
             return True
@@ -400,9 +360,16 @@ class RecorderInterface(object):
         if not self._stop_recording():
             self.logger.error("ERROR: Error while stopping recording.")
             return
+        
+        # print 
+        self.logger.info(str(self._waypoint_commands))
 
         # Save graph map
-        os.mkdir(self._download_filepath)
+        try:
+            os.mkdir(self._download_filepath)
+        except FileExistsError:
+            os.rmdir(self._download_filepath)
+            os.mkdir(self._download_filepath)
         if not self._download_full_graph():
             self.logger.error("ERROR: Error downloading graph.")
             return
@@ -438,10 +405,10 @@ class RecorderInterface(object):
                 elif wp.id not in self._desert_flag:
                     self._desert_flag[wp.id] = False
 
-        # Mark desert waypoints
-        for waypoint in graph.waypoints:
-            if self._desert_flag[waypoint.id]:
-                self._make_desert(waypoint)
+            # Mark desert waypoints
+            for waypoint in graph.waypoints:
+                if self._desert_flag[waypoint.id]:
+                    self._make_desert(waypoint)
 
         # Write graph map
         self._write_full_graph(graph)

@@ -10,6 +10,7 @@ import bosdyn
 import bosdyn.api.robot_state_pb2 as robot_state_proto
 import bosdyn.api.spot.robot_command_pb2 as spot_command_pb2
 import bosdyn.client
+import bosdyn.mission.client
 from bosdyn.client import ResponseError, RpcError
 from bosdyn.client.async_tasks import AsyncTasks
 from bosdyn.client.docking import DockingClient
@@ -25,7 +26,6 @@ from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.time_sync import TimeSyncError
 from bosdyn.client.util import setup_logging
 from bosdyn.client.world_object import WorldObjectClient
-from bosdyn.mission import MissionClient
 from bosdyn.util import duration_str, secs_to_hms
 
 from .globals import VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
@@ -63,9 +63,8 @@ class Spot:
         self.logger = self.robot.logger
         self.logger.info("Starting up")
 
-        self.logger.debug("Authenticating")
         bosdyn.client.util.authenticate(self.robot)
-        self.logger.debug("Authentication OK")
+        self.logger.info("Authentication OK")
 
         self.robot_id = self.robot.get_id()
         self.robot.start_time_sync()
@@ -81,20 +80,20 @@ class Spot:
         self.docking_client: DockingClient = (self.robot.ensure_client(DockingClient.default_service_name))
         self.map_processing_client: MapClient = self.robot.ensure_client(MapClient.default_service_name)
         self.power_client: PowerClient = self.robot.ensure_client(PowerClient.default_service_name)
-        self.mission_client = self.robot.ensure_client(MissionClient.default_service_name)
+        # self.mission_client = self.robot.ensure_client(bosdyn.mission.client.MissionClient.default_service_name)
 
         # initialize interfaces
 
         self.recording_interface = RecorderInterface(self.robot, config["download_path"], self.lease_client,
-                                                     self.estop_client, self.map_processing_client, self.power_client,
+                                                      self.map_processing_client, self.power_client,
                                                      self.state_client, self.command_client, self.world_object_client,
                                                      self.recording_client, self.graph_nav_client)
-        self.graph_nav_interface = GraphNavInterface(self.robot, config["upload_path"], self.command_client,
-                                                     self.state_client, self.graph_nav_client, self.power_client,
-                                                     self.mission_client)
+        # self.graph_nav_interface = GraphNavInterface(self.robot, config["upload_path"], self.command_client,
+        #                                              self.state_client, self.graph_nav_client, self.power_client,
+        #                                              self.mission_client)
 
         try:
-            self.estop_endpoint = EstopEndpoint(self.estop_client, 'GNClient', 9.0)
+            self.estop_endpoint = EstopEndpoint(self.estop_client, 'kg-estop', 9.0)
         except Exception as _:
             # Not the estop.
             self.estop_endpoint = None
@@ -106,9 +105,12 @@ class Spot:
         if self.estop_endpoint is not None:
             self.estop_endpoint.force_simple_setup(
             )  # Set this endpoint as the robot's sole estop.
+        
+        self.estop_endpoint.allow()
 
         self.estop_keep_alive = None
         self.exit_check = None
+        self.lease_keep_alive = None
 
         self.logger.info("Spot initialized, startup complete.")
 
@@ -177,15 +179,15 @@ class Spot:
 
     def release_estop(self):
         if self.estop_client is not None and self.estop_endpoint is not None:
-            if self._estop_keepalive:
-                self._try_grpc("stopping estop", self._estop_keepalive.stop)
-                self._estop_keepalive.shutdown()
-                self._estop_keepalive = None
+            if self.estop_keep_alive:
+                self._try_grpc("stopping estop", self.estop_keep_alive.stop)
+                self.estop_keep_alive.shutdown()
+                self.estop_keep_alive = None
 
     def estop(self):
         if self.estop_client is not None and self.estop_endpoint is not None:
-            if not self._estop_keepalive:
-                self._estop_keepalive = EstopKeepAlive(self.estop_endpoint)
+            if not self.estop_keep_alive:
+                self.estop_keep_alive = EstopKeepAlive(self.estop_endpoint)
 
     def _toggle_time_sync(self):
         if self.robot.time_sync.stopped:
@@ -302,7 +304,7 @@ class Spot:
         if not self.estop_client:
             thread_status = 'NOT ESTOP'
         else:
-            thread_status = 'RUNNING' if self._estop_keepalive else 'STOPPED'
+            thread_status = 'RUNNING' if self.estop_keep_alive else 'STOPPED'
         estop_status = '??'
         state = self.robot_state
         if state:

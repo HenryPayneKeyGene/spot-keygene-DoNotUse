@@ -1,7 +1,7 @@
 -r BLKARC-Module-API_TuDelft/requirements.txt
 
-bosdyn-client
-bosdyn-mission
+bosdyn-client >= 3.1
+bosdyn-mission >= 3.1
 
 tqdm
 numpy

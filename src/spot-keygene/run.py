@@ -19,13 +19,15 @@ class Run:
         self.logger.info("Starting up")
         self.robot = Spot(config['spot'])
         self.lidar = BLK()
-        self.nav = self.robot.graph_nav_interface
+        # self.nav = self.robot.graph_nav_interface
 
         self.starting_fiducial = config['starting_fiducial']
 
     def __del__(self):
-        self.robot.shutdown()
-        self.lidar.shutdown()
+        if hasattr(self, "robot"):
+            self.robot.shutdown()
+        if hasattr(self, "lidar"):    
+            self.lidar.shutdown()
 
     def record_mission(self):
         # disable estop and enable manual control

@@ -18,7 +18,7 @@ from bosdyn.client.math_helpers import Quat, SE3Pose
 from bosdyn.client.power import PowerClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.mission.client import MissionClient
+import bosdyn.mission.client
 
 from .util import find_unique_waypoint_id, update_waypoints_and_edges
 
@@ -28,7 +28,7 @@ class GraphNavInterface(object):
 
     def __init__(self, robot: Robot, upload_path: str, robot_command_client: RobotCommandClient,
                  robot_state_client: RobotStateClient, graph_nav_client: GraphNavClient, power_client: PowerClient,
-                 mission_client: MissionClient, lease_client: LeaseClient):
+                 mission_client: bosdyn.mission.client.MissionClient, lease_client: LeaseClient):
         self._robot = robot
         self.logger = logging.getLogger(__name__)
 

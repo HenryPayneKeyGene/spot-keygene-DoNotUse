@@ -14,9 +14,10 @@ def main():
         "spot": {
             "addr": SPOT_IP,
             "name": "spot-keygene",
-            "download_path": os.getcwd(),
-            "upload_path": os.getcwd()
-        }
+            "download_path": os.path.join(os.getcwd(), "../data"),
+            "upload_path": os.path.join(os.getcwd(), "../data")
+        },
+        "starting_fiducial": 204
     }
     run = Run(config)
-    run.autowalk()
+    run.record_mission()
