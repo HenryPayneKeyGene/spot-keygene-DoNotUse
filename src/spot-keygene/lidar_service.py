@@ -133,13 +133,16 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         elif action.startswith("download"):
             return self._download(action[9:])
 
-        return remote_pb2.TickResponse.MISSING_INPUTS, f"Unknown action '{action}'"
+        return remote_pb2.TickResponse(
+            status=remote_pb2.TickResponse.STATUS_FAILURE,
+            error_message=f"Action '{action}' not recognized."
+        )
 
     def _status(self):
         device_status = self.blk_arc.get_device_status()
         if device_status:
             device_states = device_message.DeviceStateResponse.State
-            return remote_pb2.TickResponse.STATUS_SUCCESS, f"Device is in state '{device_states.Name(device_status.state)}'."
+            return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
 
     def _capture(self):
         self.logger.info("Starting a scan. Do not move the LiDAR.")
@@ -153,39 +156,63 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
                 time.sleep(0.5)
                 attempts += 1
             if not self.blk_arc.is_scanning():
-                return remote_pb2.TickResponse.STATUS_FAILURE, "Could not start a scan."
+                return remote_pb2.TickResponse(
+                    status=remote_pb2.TickResponse.STATUS_FAILURE,
+                    error_message="Could not start a scan."
+                )
 
             self.logger.info(f"Initialized scan with ID: {start_scan_info.scan_id}.")
-            return remote_pb2.TickResponse.STATUS_SUCCESS, str(start_scan_info.scan_id)
+            return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
 
-        return remote_pb2.TickResponse.STATUS_FAILURE, "Could not start a scan."
+        return remote_pb2.TickResponse(
+            status=remote_pb2.TickResponse.STATUS_FAILURE,
+            error_message="Could not start a scan."
+        )
 
     def _stop_capture(self):
         # check if scanning
         if not self.blk_arc.is_scanning():
-            return remote_pb2.TickResponse.STATUS_FAILURE, "Cannot stop capture while not scanning"
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_FAILURE,
+                error_message="Cannot stop capture while not scanning"
+            )
 
         # Stop the scan
         self.logger.info("Stopping capture.")
         self.blk_arc.end_static_pose()
         res = self.blk_arc.stop_capture()
         if res is None:
-            return remote_pb2.TickResponse.STATUS_FAILURE, "Could not stop the scan"
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_FAILURE,
+                error_message="Could not stop capture"
+            )
 
         self.logger.info("Stopped capture.")
-        return remote_pb2.TickResponse.STATUS_SUCCESS, res.duration
+        return remote_pb2.TickResponse(
+            status=remote_pb2.TickResponse.STATUS_SUCCESS,
+            # string_response=str(res.scan_id)
+        )
 
     def _download(self, scan_id: str):
         # check if scanning
         if self.blk_arc.is_scanning():
-            return remote_pb2.TickResponse.STATUS_FAILURE, "Cannot download while scanning"
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_FAILURE,
+                error_message="Cannot download while scanning"
+            )
 
         # Download the scan
         self.logger.info("Downloading the scan.")
         if not self.blk_arc.download_scan(int(scan_id), DOWNLOAD_PATH):
-            return remote_pb2.TickResponse.STATUS_FAILURE, "Could not download the scan"
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_FAILURE,
+                error_message="Could not download the scan"
+            )
         self.logger.info("Downloaded the scan.")
-        return remote_pb2.TickResponse.STATUS_SUCCESS, str(DOWNLOAD_PATH / f"{scan_id}.blk")
+        return remote_pb2.TickResponse(
+            status=remote_pb2.TickResponse.STATUS_SUCCESS,
+            # string_response=str(scan_id)
+        )
 
     def EstablishSession(self, request, _context):
         response = remote_pb2.EstablishSessionResponse()
