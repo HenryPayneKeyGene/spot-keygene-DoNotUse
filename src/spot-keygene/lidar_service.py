@@ -12,6 +12,7 @@ It can also be used during autowalk missions to capture scans.
 
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Tuple
@@ -73,7 +74,13 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             self.logger.warning("Could not connect, make sure you selected the right connection-type.")
             return
 
-            # Get Device Info:
+        self.state = "idle"
+        self.error_message = "An error occurred"
+
+        self.display_status()
+
+    def display_status(self):
+        # Get Device Info:
         device_info = self.blk_arc.get_device_info()
         if device_info:
             self.logger.info("\nDevice info:\n"
@@ -81,14 +88,12 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
                              f"  Serial Number: {device_info.serial_number}")
         else:
             self.logger.warning("Could not get device-info.")
-
         # Get Firmware Version:
         firmware_version = self.blk_arc.get_firmware_version()
         if firmware_version:
             self.logger.info(f"Firmware version: {firmware_version}")
         else:
             self.logger.warning("Could not get firmware-version.")
-
         # Get Device Status:
         device_status = self.blk_arc.get_device_status()
         if device_status:
@@ -96,7 +101,6 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             self.logger.info(f"Device is in state '{device_states.Name(device_status.state)}'.")
         else:
             self.logger.warning("Could not get device-status.")
-
         # Get Disk Information
         free_disk_space = self.blk_arc.get_free_disk_space_percentage()
         if free_disk_space:
@@ -142,8 +146,8 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             device_states = device_message.DeviceStateResponse.State
             return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
 
-    def _capture(self):
-        self.logger.info("Starting a scan. Do not move the LiDAR.")
+    def _capture_thread(self):
+
         start_scan_info = self.blk_arc.start_capture()
 
         if start_scan_info:
@@ -153,43 +157,70 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
                 time.sleep(0.5)
                 attempts += 1
             if not self.blk_arc.is_scanning():
-                return remote_pb2.TickResponse(
-                    status=remote_pb2.TickResponse.STATUS_FAILURE,
-                    error_message="Could not start a scan."
-                )
+                self.state = "error"
+                self.error_message = "Could not start scan"
+                return
 
+            self.state = "scanning"
             self.logger.info(f"Initialized scan with ID: {start_scan_info.scan_id}.")
             self.blk_arc.begin_static_pose()
             return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
 
-        return remote_pb2.TickResponse(
-            status=remote_pb2.TickResponse.STATUS_FAILURE,
-            error_message="Could not start a scan."
-        )
+        self.state = "error"
+        self.error_message = "Could not start scan"
+
+    def _capture(self):
+        if self.state == "scanning":
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_SUCCESS
+            )
+        elif self.state == "error":
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_FAILURE,
+                error_message=self.error_message
+            )
+
+        self.logger.info("Starting a scan. Do not move the LiDAR.")
+
+        # in order to return asap, start capture in a new thread
+        thread = threading.Thread(target=self._capture_thread)
+        thread.daemon = True
+        thread.start()
+
+        return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_RUNNING)
 
     def _stop_capture(self):
         # check if scanning
-        if not self.blk_arc.is_scanning():
+        if self.state == "error":
             return remote_pb2.TickResponse(
                 status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message="Cannot stop capture while not scanning"
+                error_message=self.error_message
+            )
+        elif self.state == "idle":
+            return remote_pb2.TickResponse(
+                status=remote_pb2.TickResponse.STATUS_SUCCESS
             )
 
         # Stop the scan
+        # in order to return asap, stop capture in a new thread
+        thread = threading.Thread(target=self._stop_capture_thread)
+        thread.daemon = True
+        thread.start()
+
+        return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_RUNNING)
+
+    def _stop_capture_thread(self):
+        if not self.blk_arc.is_scanning():
+            return
         self.logger.info("Stopping capture.")
         self.blk_arc.end_static_pose()
         res = self.blk_arc.stop_capture()
         if res is None:
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message="Could not stop capture"
-            )
-
+            self.logger.error("Could not stop capture.")
+            self.state = "error"
+            self.error_message = "Could not stop capture"
         self.logger.info("Stopped capture.")
-        return remote_pb2.TickResponse(
-            status=remote_pb2.TickResponse.STATUS_SUCCESS,
-            # string_response=str(res.scan_id)
-        )
+        self.state = "idle"
 
     def _download(self, scan_id: str):
         # check if scanning
