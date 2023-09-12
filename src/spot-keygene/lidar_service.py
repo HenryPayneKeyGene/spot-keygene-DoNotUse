@@ -121,31 +121,31 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             self.logger.info(f"Action: {action}")
 
             # do action
-            response = self._action(action)
+            self._action(action, response)
             self.logger.info(f"Response: {response}")
         return response
 
-    def _action(self, action) -> Tuple[remote_pb2.TickResponse, str]:
+    def _action(self, action, response) -> Tuple[remote_pb2.TickResponse, str]:
         # match action
         if action == "status":
-            return self._status()
+            return self._status(response)
         elif action == "capture":
-            return self._capture()
+            return self._capture(response)
         elif action == "stop-capture":
-            return self._stop_capture()
+            return self._stop_capture(response)
         elif action.startswith("download"):
-            return self._download(action[9:])
+            return self._download(action[9:], response)
 
         return remote_pb2.TickResponse(
             status=remote_pb2.TickResponse.STATUS_FAILURE,
             error_message=f"Action '{action}' not recognized."
         )
 
-    def _status(self):
+    def _status(self, response):
         device_status = self.blk_arc.get_device_status()
         if device_status:
             device_states = device_message.DeviceStateResponse.State
-            return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
+            response.status = remote_pb2.TickResponse.STATUS_SUCCESS
 
     def _capture_thread(self):
 
@@ -170,16 +170,14 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         self.state = "error"
         self.error_message = "Could not start scan"
 
-    def _capture(self):
+    def _capture(self, response):
         if self.state == "scanning":
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_SUCCESS
-            )
+            response.status = remote_pb2.TickResponse.STATUS_SUCCESS
+            return
         elif self.state == "error":
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message=self.error_message
-            )
+            response.status = remote_pb2.TickResponse.STATUS_FAILURE
+            response.error_message = self.error_message
+            return
 
         self.logger.info("Starting a scan. Do not move the LiDAR.")
 
@@ -188,19 +186,17 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         thread.daemon = True
         thread.start()
 
-        return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_RUNNING)
+        response.status = remote_pb2.TickResponse.STATUS_SUCCESS
 
-    def _stop_capture(self):
+    def _stop_capture(self, response):
         # check if scanning
         if self.state == "error":
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message=self.error_message
-            )
+            response.status = remote_pb2.TickResponse.STATUS_FAILURE
+            response.error_message = self.error_message
+            return
         elif self.state == "idle":
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_SUCCESS
-            )
+            response.status = remote_pb2.TickResponse.STATUS_SUCCESS
+            return
 
         # Stop the scan
         # in order to return asap, stop capture in a new thread
@@ -208,7 +204,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         thread.daemon = True
         thread.start()
 
-        return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_RUNNING)
+        response.status = remote_pb2.TickResponse.STATUS_SUCCESS
 
     def _stop_capture_thread(self):
         if not self.blk_arc.is_scanning():
