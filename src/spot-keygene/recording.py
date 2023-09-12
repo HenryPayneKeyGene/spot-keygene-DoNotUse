@@ -699,14 +699,10 @@ class RecorderInterface:
     @staticmethod
     def _make_scan_node(waypoint_id):
         """Make scan node."""
-        # this is actually a sleep node. scan is implemented in the mission.
-        loc = nodes_pb2.Node()
-        loc.name = 'scan'
+        # sequence:
+        #   stand
+        #   RemoteServiceCall: blk-arc
 
-        impl = nodes_pb2.Sleep(seconds=10)
-
-        loc.impl.Pack(impl)
-        return loc
 
     @staticmethod
     def _make_initialize_node():
