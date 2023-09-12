@@ -6,10 +6,14 @@
 # https://opensource.org/licenses/MIT
 #
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-BASE_DIR=$( dirname "${SCRIPT_DIR}" )
+BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+. /home/spot/.pyenv/versions/kg/bin/activate
 
 pushd "$BASE_DIR" || exit
     ./setup.sh
-    python3 -m spot-keygene lidar --host-ip 192.168.50.5 192.168.80.3
+    http_proxy=
+    https_proxy=
+    echo "starting lidar service"
+    python -m spot-keygene lidar --host-ip 192.168.50.5 192.168.80.3
 popd || exit

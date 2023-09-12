@@ -2,6 +2,6 @@
 
 bosdyn-client >= 3.1
 bosdyn-mission >= 3.1
-
+build
 tqdm
 windows-curses ; sys_platform == 'win32'
