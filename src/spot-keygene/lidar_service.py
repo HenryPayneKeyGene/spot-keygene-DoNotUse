@@ -145,7 +145,6 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
     def _capture(self):
         self.logger.info("Starting a scan. Do not move the LiDAR.")
         start_scan_info = self.blk_arc.start_capture()
-        self.blk_arc.begin_static_pose()
 
         if start_scan_info:
             # Wait for the scan to be initialized, up to 10 seconds:
@@ -160,6 +159,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
                 )
 
             self.logger.info(f"Initialized scan with ID: {start_scan_info.scan_id}.")
+            self.blk_arc.begin_static_pose()
             return remote_pb2.TickResponse(status=remote_pb2.TickResponse.STATUS_SUCCESS)
 
         return remote_pb2.TickResponse(
@@ -215,7 +215,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
     def EstablishSession(self, request, _context):
         response = remote_pb2.EstablishSessionResponse()
         with ResponseContext(response, request):
-            self.logger.info('EstablishSession unimplemented!')
+            self.logger.info('established session')
             response.status = remote_pb2.EstablishSessionResponse.STATUS_OK
         return response
 
@@ -223,6 +223,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         response = remote_pb2.StopResponse()
         with ResponseContext(response, request):
             self.logger.info('Stop unimplemented!')
+            # maybe stop capture?
             response.status = remote_pb2.StopResponse.STATUS_OK
         return response
 
