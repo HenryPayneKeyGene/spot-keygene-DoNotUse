@@ -1,0 +1,11 @@
+[Unit]
+Description=BLK ARC Service for Spot
+
+[Service]
+Environment=HOME=/home/spot
+
+ExecStart=/home/spot/impactlab/spot-keygene/lidar.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
