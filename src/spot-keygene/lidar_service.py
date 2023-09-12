@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Tuple
 
 import bosdyn.client
 import bosdyn.client.util
@@ -125,7 +124,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             self.logger.info(f"Response: {response}")
         return response
 
-    def _action(self, action, response) -> Tuple[remote_pb2.TickResponse, str]:
+    def _action(self, action, response: remote_pb2.TickResponse) -> None:
         # match action
         if action == "status":
             return self._status(response)
@@ -145,6 +144,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         device_status = self.blk_arc.get_device_status()
         if device_status:
             device_states = device_message.DeviceStateResponse.State
+            self.logger.info(f"Device state: {device_states.Name(device_status.state)}")
             response.status = remote_pb2.TickResponse.STATUS_SUCCESS
 
     def _capture_thread(self):
@@ -219,26 +219,27 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         self.logger.info("Stopped capture.")
         self.state = "idle"
 
-    def _download(self, scan_id: str):
+    def _download(self, scan_id: str, response):
         # check if scanning
-        if self.blk_arc.is_scanning():
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message="Cannot download while scanning"
-            )
+        if self.state == "error":
+            response.status = remote_pb2.TickResponse.STATUS_FAILURE
+            response.error_message = self.error_message
+            return
+        elif self.state == "scanning":
+            response.status = remote_pb2.TickResponse.STATUS_FAILURE
+            response.error_message = "Cannot download while scanning"
+            return
 
-        # Download the scan
-        self.logger.info("Downloading the scan.")
-        if not self.blk_arc.download_scan(int(scan_id), DOWNLOAD_PATH):
-            return remote_pb2.TickResponse(
-                status=remote_pb2.TickResponse.STATUS_FAILURE,
-                error_message="Could not download the scan"
-            )
-        self.logger.info("Downloaded the scan.")
-        return remote_pb2.TickResponse(
-            status=remote_pb2.TickResponse.STATUS_SUCCESS,
-            # string_response=str(scan_id)
-        )
+        # Download the captured scan:
+        self.logger.info(f"Downloading scan {scan_id} to '{DOWNLOAD_PATH}', this might take a while...")
+        res = self.blk_arc.download_scan(int(scan_id), DOWNLOAD_PATH)
+        if res is None:
+            self.logger.error(f"Could not download scan {scan_id}.")
+            response.status = remote_pb2.TickResponse.STATUS_FAILURE
+            response.error_message = f"Could not download scan {scan_id}."
+            return
+        self.logger.info(f"Downloaded scan {scan_id}.")
+        response.status = remote_pb2.TickResponse.STATUS_SUCCESS
 
     def EstablishSession(self, request, _context):
         response = remote_pb2.EstablishSessionResponse()
@@ -250,9 +251,13 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
     def Stop(self, request, _context):
         response = remote_pb2.StopResponse()
         with ResponseContext(response, request):
-            self.logger.info('Stop unimplemented!')
-            # maybe stop capture?
-            response.status = remote_pb2.StopResponse.STATUS_OK
+            self.logger.info('stop requested')
+            self._stop_capture(response)
+            if response.status == remote_pb2.TickResponse.STATUS_FAILURE:
+                response.status = remote_pb2.StopResponse.STATUS_FAILURE
+                response.error_message = "Could not stop capture"
+            else:
+                response.status = remote_pb2.StopResponse.STATUS_OK
         return response
 
     def TeardownSession(self, request, _context):
@@ -278,6 +283,29 @@ def run_service(port, logger=None):
     return GrpcServiceRunner(service_servicer, add_servicer_to_server_fn, port, logger=logger)
 
 
+def start(opt):
+    # Setup logging to use either INFO level or DEBUG level.
+    setup_logging(opt.verbose)
+
+    # Create and authenticate a bosdyn robot object.
+    sdk = bosdyn.client.create_standard_sdk('HelloWorldMissionServiceSDK')
+    robot = sdk.create_robot(opt.hostname)
+    bosdyn.client.util.authenticate(robot)
+
+    # Create a service runner to start and maintain the service on background thread.
+    # noinspection PyShadowingNames
+    service_runner = run_service(opt.port, logger=_LOGGER)
+
+    # Use a keep alive to register the service with the robot directory.
+    dir_reg_client = robot.ensure_client(DirectoryRegistrationClient.default_service_name)
+    keep_alive = DirectoryRegistrationKeepAlive(dir_reg_client, logger=_LOGGER)
+    keep_alive.start(DIRECTORY_NAME, SERVICE_TYPE, AUTHORITY, opt.host_ip, service_runner.port)
+
+    # Attach the keep alive to the service runner and run until a SIGINT is received.
+    with keep_alive:
+        service_runner.run_until_interrupt()
+
+
 if __name__ == '__main__':
     # Define all arguments used by this service.
     import argparse
@@ -298,7 +326,7 @@ if __name__ == '__main__':
     options = parser.parse_args()
 
     # If using the example without a robot in the loop, start up the service, which can be
-    # be accessed directly at localhost:options.port.
+    #  accessed directly at localhost:options.port.
     if options.host_type == 'local':
         # Setup logging to use INFO level.
         setup_logging()
@@ -309,23 +337,4 @@ if __name__ == '__main__':
 
     # Else if a robot is available, register the service with the robot so that all clients can
     # access it through the robot directory without knowledge of the service IP or port.
-
-    # Setup logging to use either INFO level or DEBUG level.
-    setup_logging(options.verbose)
-
-    # Create and authenticate a bosdyn robot object.
-    sdk = bosdyn.client.create_standard_sdk('HelloWorldMissionServiceSDK')
-    robot = sdk.create_robot(options.hostname)
-    bosdyn.client.util.authenticate(robot)
-
-    # Create a service runner to start and maintain the service on background thread.
-    service_runner = run_service(options.port, logger=_LOGGER)
-
-    # Use a keep alive to register the service with the robot directory.
-    dir_reg_client = robot.ensure_client(DirectoryRegistrationClient.default_service_name)
-    keep_alive = DirectoryRegistrationKeepAlive(dir_reg_client, logger=_LOGGER)
-    keep_alive.start(DIRECTORY_NAME, SERVICE_TYPE, AUTHORITY, options.host_ip, service_runner.port)
-
-    # Attach the keep alive to the service runner and run until a SIGINT is received.
-    with keep_alive:
-        service_runner.run_until_interrupt()
+    start(options)
