@@ -117,9 +117,7 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
             self.logger.info(f"Action: {action}")
 
             # do action
-            result = self._action(action)
-            response.string_response = result[1]
-            response.status = result[0]
+            response = self._action(action)
         return response
 
     def _action(self, action) -> Tuple[remote_pb2.TickResponse, str]:
