@@ -187,36 +187,32 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         self.logger.info("Downloaded the scan.")
         return remote_pb2.TickResponse.STATUS_SUCCESS, str(DOWNLOAD_PATH / f"{scan_id}.blk")
 
+    def EstablishSession(self, request, _context):
+        response = remote_pb2.EstablishSessionResponse()
+        with ResponseContext(response, request):
+            self.logger.info('EstablishSession unimplemented!')
+            response.status = remote_pb2.EstablishSessionResponse.STATUS_OK
+        return response
 
-def EstablishSession(self, request, _context):
-    response = remote_pb2.EstablishSessionResponse()
-    with ResponseContext(response, request):
-        self.logger.info('EstablishSession unimplemented!')
-        response.status = remote_pb2.EstablishSessionResponse.STATUS_OK
-    return response
+    def Stop(self, request, _context):
+        response = remote_pb2.StopResponse()
+        with ResponseContext(response, request):
+            self.logger.info('Stop unimplemented!')
+            response.status = remote_pb2.StopResponse.STATUS_OK
+        return response
 
+    def TeardownSession(self, request, _context):
+        response = remote_pb2.TeardownSessionResponse()
+        with ResponseContext(response, request):
+            self.logger.info('TeardownSession unimplemented!')
+            response.status = remote_pb2.TeardownSessionResponse.STATUS_OK
+        return response
 
-def Stop(self, request, _context):
-    response = remote_pb2.StopResponse()
-    with ResponseContext(response, request):
-        self.logger.info('Stop unimplemented!')
-        response.status = remote_pb2.StopResponse.STATUS_OK
-    return response
-
-
-def TeardownSession(self, request, _context):
-    response = remote_pb2.TeardownSessionResponse()
-    with ResponseContext(response, request):
-        self.logger.info('TeardownSession unimplemented!')
-        response.status = remote_pb2.TeardownSessionResponse.STATUS_OK
-    return response
-
-
-def GetRemoteMissionServiceInfo(self, request, _context):
-    response = remote_pb2.GetRemoteMissionServiceInfoResponse()
-    with ResponseContext(response, request):
-        response.custom_params.CopyFrom(self.custom_params)
-    return response
+    def GetRemoteMissionServiceInfo(self, request, _context):
+        response = remote_pb2.GetRemoteMissionServiceInfoResponse()
+        with ResponseContext(response, request):
+            response.custom_params.CopyFrom(self.custom_params)
+        return response
 
 
 def run_service(port, logger=None):
