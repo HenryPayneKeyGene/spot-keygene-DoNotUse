@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # Copyright (c) Romir Kulshrestha 2023.
 # You may use, distribute and modify this code under the terms of the MIT License.
 # You should have received a copy of the MIT License with this file. If not, please visit:
@@ -6,12 +7,11 @@
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-. /home/spot/.pyenv/versions/kg/bin/activate
-. /etc/environment
+source /etc/environment
+source /home/spot/.pyenv/versions/kg/bin/activate
 
-# install requirements
+# get updates and install requirements
 pushd "$BASE_DIR" || exit
-    pip -V
     git checkout main
     git pull origin main
     pip install -r requirements.txt

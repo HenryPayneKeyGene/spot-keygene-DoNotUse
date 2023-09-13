@@ -1,16 +1,26 @@
 [project]
 name = "spot-keygene"
-version = "0.0.1"
+version = "0.1.0alpha"
+description = "Code for the KeyGene project at YES!Delft"
 authors = [
-  { name="Romir Kulshrestha", email="r.kulshrestha@student.tudelft.nl" },
+    { name = "Romir Kulshrestha", email = "r.kulshrestha@student.tudelft.nl" },
 ]
-description = ""
+license = { text = "MIT License" }
 readme = "README.md"
 requires-python = ">=3.7, <3.8"
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Development Status :: 3 - Alpha",
+]
+dependencies = [
+    "bosdyn-client >= 3.1",
+    "bosdyn-mission >= 3.1",
+    "tqdm",
+    "windows-curses ; sys_platform == 'win32'",
 ]
 
-#[project.urls]
+[project.urls]
+Repository = "https://github.com/romirk/spot-keygene"
+Home-Page = "https://romir.eu/"
