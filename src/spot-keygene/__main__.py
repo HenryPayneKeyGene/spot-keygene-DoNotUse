@@ -8,10 +8,6 @@ import sys
 
 from bosdyn.client.util import add_base_arguments, add_service_endpoint_arguments
 
-from .lidar_service import start_lidar
-from .main import default_main
-from .recording import start_recording
-
 parser = argparse.ArgumentParser(description='Spot Keygene')
 parser.add_argument('--version', action='version', version='%(prog)s 0.1.0')
 
@@ -29,12 +25,18 @@ options = parser.parse_args()
 
 if options.service == 'lidar':
     print("Starting LiDAR service...")
+    from .lidar_service import start_lidar
+
     start_lidar(options)
     sys.exit(0)
 elif options.service == 'record':
     print("Starting recording service...")
+    from .recording import start_recording
+
     start_recording(options)
     sys.exit(0)
 else:
     print("Starting...")
+    from .main import default_main
+
     default_main()
