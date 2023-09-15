@@ -5,15 +5,16 @@
 # You should have received a copy of the MIT License with this file. If not, please visit:
 # https://opensource.org/licenses/MIT
 
-BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+BASE_DIR=$(dirname "$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )")
 
 source /etc/environment
-source /home/spot/.pyenv/versions/kg/bin/activate
+source ~/.pyenv/versions/kg/bin/activate
 
 # get updates and install requirements
 pushd "$BASE_DIR" || exit
     git checkout main
     git pull origin main
+    python -m pip install -U pip
     pip install -r requirements.txt
 popd || exit
 
@@ -26,7 +27,18 @@ popd || exit
 
 # install spot-keygene
 pushd "$BASE_DIR" || exit
+    rm -rf ./dist/*
     python -m build
-    pip install ./dist/spot_keygene-0.0.1-py3-none-any.whl --force-reinstall
-exit
+    pip install -U ./dist/spot_keygene-*-py3-none-any.whl --force-reinstall
+
+popd
+
+if [ $(whoami) = "spot" ]
+then
+    # copy service files to systemd
+    sudo cp "$BASE_DIR"/scripts/lidar.service /etc/systemd/system/lidar.service
+    sudo systemctl daemon-reload
+else
+    echo "run as spot to add to systemd"
+fi
 
