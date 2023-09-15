@@ -9,7 +9,7 @@ from .run import Run
 SPOT_IP = '192.168.80.3'
 
 
-def main():
+def default_main():
     config = {
         "spot": {
             "addr": SPOT_IP,

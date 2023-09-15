@@ -5,3 +5,5 @@ bosdyn-mission >= 3.1
 build
 tqdm
 windows-curses ; sys_platform == 'win32'
+numpy
+pyqt5

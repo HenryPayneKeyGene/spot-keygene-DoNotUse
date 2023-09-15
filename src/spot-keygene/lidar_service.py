@@ -112,7 +112,6 @@ class BlkArcServicer(remote_service_pb2_grpc.RemoteMissionServiceServicer):
         response = remote_pb2.TickResponse()
         # This utility context manager will fill out some fields in the message headers.
         with ResponseContext(response, request):
-            # Default to saying hello to 'World'.
             action = 'status'
             action_param = request.params.values.get(_ACTION_KEY)
             if action_param is not None:
@@ -283,12 +282,12 @@ def run_service(port, logger=None):
     return GrpcServiceRunner(service_servicer, add_servicer_to_server_fn, port, logger=logger)
 
 
-def start(opt):
+def start_lidar(opt):
     # Setup logging to use either INFO level or DEBUG level.
     setup_logging(opt.verbose)
 
     # Create and authenticate a bosdyn robot object.
-    sdk = bosdyn.client.create_standard_sdk('HelloWorldMissionServiceSDK')
+    sdk = bosdyn.client.create_standard_sdk('BlkArcServiceClient')
     robot = sdk.create_robot(opt.hostname)
     bosdyn.client.util.authenticate(robot)
 
@@ -337,4 +336,4 @@ if __name__ == '__main__':
 
     # Else if a robot is available, register the service with the robot so that all clients can
     # access it through the robot directory without knowledge of the service IP or port.
-    start(options)
+    start_lidar(options)
