@@ -28,10 +28,13 @@ record_parser.add_argument('--output', help='Output directory for the recording.
 options = parser.parse_args()
 
 if options.service == 'lidar':
+    print("Starting LiDAR service...")
     start_lidar(options)
     sys.exit(0)
 elif options.service == 'record':
+    print("Starting recording service...")
     start_recording(options)
     sys.exit(0)
-
-default_main()
+else:
+    print("Starting...")
+    default_main()
