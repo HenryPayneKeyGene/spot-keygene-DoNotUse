@@ -8,7 +8,7 @@
 BASE_DIR=$(dirname "$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )")
 
 source /etc/environment
-source ~/.pyenv/versions/kg/bin/activate
+source /home/spot/.pyenv/versions/kg/bin/activate
 
 # get updates and install requirements
 pushd "$BASE_DIR" || exit
@@ -29,7 +29,7 @@ popd || exit
 pushd "$BASE_DIR" || exit
     rm -rf ./dist/*
     python -m build
-    pip install -U ./dist/spot_keygene-*-py3-none-any.whl --force-reinstall
+    pip install ./dist/spot_keygene-*-py3-none-any.whl --force-reinstall
 
 popd
 

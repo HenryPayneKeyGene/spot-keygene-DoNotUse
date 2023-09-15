@@ -2,6 +2,7 @@
 Description=BLK ARC Service for Spot
 
 [Service]
+User=spot
 Environment=HOME=/home/spot
 EnvironmentFile=/home/spot/.env
 

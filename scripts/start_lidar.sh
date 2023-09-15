@@ -15,7 +15,7 @@ pushd "$BASE_DIR" || exit
     # ensure packages are installed
     ./setup.sh
 
-    echo "\033[1;32mStarting lidar service...\033[0m"
+    echo -e "\033[1;32mStarting lidar service...\033[0m"
 
     # unset proxy
     http_proxy=
