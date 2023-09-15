@@ -1,717 +1,877 @@
-#  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
+# Copyright (c) 2023 Boston Dynamics, Inc.  All rights reserved.
+#
+# Downloading, reproducing, distributing or otherwise using the SDK Software
+# is subject to the terms and conditions of the Boston Dynamics Software
+# Development Kit License (20191101-BDSDK-SL).
 
-import curses
+"""Record Autowalk"""
+
 import logging
 import os
-import threading
+import sys
 import time
 
-import bosdyn.api.robot_state_pb2 as robot_state_proto
-from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, map_processing_pb2, recording_pb2
+import PyQt5.QtCore as QtCore
+import PyQt5.QtWidgets as QtWidgets
+import bosdyn.api.basic_command_pb2 as basic_command_pb2
+import bosdyn.api.mission
+import bosdyn.api.service_customization_pb2 as service_customization
+import bosdyn.client
+import bosdyn.client.lease
+import bosdyn.client.util
+import bosdyn.geometry as geometry
+import bosdyn.mission.client
+import bosdyn.util
+import numpy as np
+from PyQt5.QtWidgets import QVBoxLayout
+from bosdyn.api import geometry_pb2, image_pb2, world_object_pb2
+from bosdyn.api.autowalk import walks_pb2
+from bosdyn.api.data_acquisition_pb2 import AcquireDataRequest, DataCapture, ImageSourceCapture
+from bosdyn.api.graph_nav import graph_nav_pb2, recording_pb2
 from bosdyn.api.mission import nodes_pb2
-from bosdyn.client import RpcError
-from bosdyn.client.recording import GraphNavRecordingServiceClient, NotLocalizedToEndError, NotReadyYetError
-from bosdyn.client.time_sync import TimeSyncError
-from bosdyn.util import duration_str, secs_to_hms
-from google.protobuf import wrappers_pb2 as wrappers
+from bosdyn.client import ResponseError, RpcError
+from bosdyn.client.async_tasks import AsyncPeriodicQuery, AsyncTasks
+from bosdyn.client.docking import docking_pb2
+from bosdyn.client.lease import Error as LeaseBaseError, LeaseKeepAlive
+from bosdyn.client.recording import GraphNavRecordingServiceClient
+from bosdyn.client.robot_command import RobotCommandBuilder
+from bosdyn.util import now_sec, seconds_to_timestamp
+from google.protobuf.duration_pb2 import Duration
 
-from .globals import COMMAND_INPUT_RATE, NAV_VELOCITY_LIMITS
+from .lidar_service import DIRECTORY_NAME
 from .spot import Spot
-from .util import ExitCheck
+
+LOGGER = logging.getLogger()
+
+IMAGE_SOURCES = [
+    'frontright_fisheye_image', 'frontleft_fisheye_image', 'right_fisheye_image',
+    'back_fisheye_image', 'left_fisheye_image'
+]
+ASYNC_CAPTURE_RATE = 40  # milliseconds, 25 Hz
+LINEAR_VELOCITY_DEFAULT = 0.6  # m/s
+ANGULAR_VELOCITY_DEFAULT = 0.8  # rad/sec
+COMMAND_DURATION_DEFAULT = 0.6  # seconds
+SLIDER_MIDDLE_VALUE = 50
+TRAVEL_MAX_DIST = 0.2  # meters
+BLOCKED_PATH_WAIT_TIME = 5  # seconds
+RETRY_COUNT_DEFAULT = 1
+PROMPT_DURATION_DEFAULT = 60  # seconds
+PROMPT_DURATION_DOCK = 600  # seconds
+BATTERY_THRESHOLDS = (60.0, 10.0)  # battery percentages
+POSE_INDEX, ROBOT_CAMERA_INDEX, DOCK_INDEX, SCAN_INDEX = range(4)
+INITIAL_PANEL, RECORDED_PANEL, ACTION_PANEL, FINAL_PANEL = range(4)
 
 
-def write_bytes(filepath, filename, data):
-    """Write data to a file."""
-    os.makedirs(filepath, exist_ok=True)
-    with open(os.path.join(filepath, filename), 'wb+') as f:
-        f.write(data)
-        f.close()
+def start_recording(args):
+    """Record auto-walks with GUI"""
+
+    # Configure logging
+    bosdyn.client.util.setup_logging()
+
+    config = {
+        "name": "Spot Keygene (Record Autowalk)",
+        "addr": args.hostname,
+        "download_path": "/home/romir/Downloads/spot",
+    }
+    spot = Spot(config)
+    assert not spot.robot.is_estopped(), 'Robot is estopped. ' \
+                                         'Please use an external E-Stop client, ' \
+                                         'such as the estop SDK example, to configure E-Stop.'
+
+    # Power on and get lease
+    app = QtWidgets.QApplication(sys.argv)
+    gui = AutowalkGUI(spot)
+    gui.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+    gui.show()
+    app.exec_()
+
+    return True
 
 
-def write_mission(mission, filename):
-    """ Write a mission to disk. """
-    open(filename, 'wb').write(mission.SerializeToString())
+def init_robot(hostname):
+    """Initialize robot object"""
+
+    # Initialize SDK
+    sdk = bosdyn.client.create_standard_sdk('RecordAutowalk', [bosdyn.mission.client.MissionClient])
+
+    # Create robot object
+    robot = sdk.create_robot(hostname)
+
+    # Authenticate with robot
+    bosdyn.client.util.authenticate(robot)
+
+    # Establish time sync with the robot
+    robot.time_sync.wait_for_sync()
+
+    return robot
 
 
-class CursesHandler(logging.Handler):
-    """logging handler which puts messages into the curses interface"""
+class AsyncRobotState(AsyncPeriodicQuery):
+    """Grab robot state."""
 
-    def __init__(self, wasd_interface):
-        super(CursesHandler, self).__init__()
-        self._wasd_interface = wasd_interface
+    def __init__(self, robot_state_client):
+        super(AsyncRobotState, self).__init__('robot_state', robot_state_client, LOGGER,
+                                              period_sec=0.2)
 
-    def emit(self, record):
-        msg = record.getMessage()
-        msg = msg.replace('\n', ' ').replace('\r', '')
-        self._wasd_interface.add_message(f'{record.levelname:s} {msg:s}')
+    def _start_query(self):
+        return self._client.get_robot_state_async()
 
 
-class RecorderInterface:
-    def __init__(self, spot: Spot):
-        self.spot = spot
-        self.logger = logging.getLogger(__name__)
+class WindowWidget(QtWidgets.QWidget):
+    """Window class to continuously check for key presses"""
 
-        # Flag indicating whether mission is currently being recorded
-        self._recording = False
+    key_pressed = QtCore.pyqtSignal(str)
 
-        # Flag indicating whether robot is in feature desert mode
-        self._desert_mode = False
+    def keyPressEvent(self, key_event):
+        self.key_pressed.emit(key_event.text())
 
-        # Filepath for the location to put the downloaded graph and snapshots.
-        self._download_filepath = self.spot.download_path
 
-        # List of waypoint commands
-        self._waypoint_commands = []
+class AutowalkGUI(QtWidgets.QMainWindow):
+    """GUI for recording autowalk"""
+    pose_panel_layout: QVBoxLayout
 
-        # Dictionary indicating which waypoints are deserts
-        self._desert_flag = {}
+    def __init__(self, robot: Spot):
+        super().__init__()
+        self.spot = robot
+        self.robot = self.spot.robot
 
-        # Current waypoint id
-        self._waypoint_id = 'NONE'
+        self._robot_id = self.robot.get_id()
+        self._lease_keepalive = None
+        self.walk = self._init_walk()
+        self.directory = os.getcwd()
 
-        # Local copy of the graph.
-        self._graph = None
-        self._all_graph_wps_in_order = []
+        # Initialize clients
+        self._lease_client = self.spot.lease_client
+        self._power_client = self.spot.power_client
+        self._robot_state_client = self.spot.state_client
+        self._robot_command_client = self.spot.command_client
+        self._graph_nav_client = self.spot.graph_nav_client
+        # Clear graph to ensure only the data recorded using this example gets packaged into map
+        self._graph_nav_client.clear_graph()
+        self._recording_client = self.spot.recording_client
+        self._world_object_client = self.spot.world_object_client
+        self._docking_client = self.spot.docking_client
 
-        self._command_dictionary = {
-            27: self.spot.stop,  # ESC key
-            ord('\t'): self._quit_program,
-            ord('T'): self.spot.toggle_time_sync,
-            ord(' '): self.spot.toggle_estop,
-            ord('r'): self.spot.self_right,
-            ord('P'): self.spot.toggle_power,
-            ord('v'): self.spot.sit,
-            ord('f'): self.spot.stand,
-            ord('w'): self.spot.move_forward,
-            ord('s'): self.spot.move_backward,
-            ord('a'): self.spot.strafe_left,
-            ord('c'): self._auto_close_loops,
-            ord('d'): self.spot.strafe_right,
-            ord('q'): self.spot.turn_left,
-            ord('e'): self.spot.turn_right,
-            ord('m'): self._start_recording,
-            ord('l'): self._relocalize,
-            ord('z'): self._enter_desert,
-            ord('x'): self._exit_desert,
-            ord('g'): self._generate_mission,
-            ord('j'): self._scan
+        # Initialize async tasks
+        self._robot_state_task = AsyncRobotState(self._robot_state_client)
+        self._async_tasks = AsyncTasks([self._robot_state_task])
+        self._async_tasks.update()
+
+        # Timer for grabbing robot states
+        self.timer = QtCore.QTimer(self)
+        self.timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self.timer.timeout.connect(self._update_tasks)
+        self.timer.start(ASYNC_CAPTURE_RATE)
+
+        # Default starting speed values for the robot
+        self.linear_velocity = LINEAR_VELOCITY_DEFAULT
+        self.angular_velocity = ANGULAR_VELOCITY_DEFAULT
+        self.command_duration = COMMAND_DURATION_DEFAULT
+
+        # Experimentally determined default starting values for pitch, roll, yaw, and height
+        self.euler_angles = geometry.EulerZXY()
+        self.robot_height = 0
+
+        self.resumed_recording = False
+        self.elements = []
+        self.fiducial_objects = []
+        self.dock = None
+        self.dock_and_end_recording = False
+
+        self.command_to_function = {
+            27: self._quit_program,
+            ord('P'): self.spot.toggle_power(),
+            ord('v'): self.spot.sit(),
+            ord('f'): self.spot.stand(),
+            ord('w'): self.spot.move_forward(),
+            ord('s'): self.spot.move_backward(),
+            ord('a'): self.spot.strafe_left(),
+            ord('d'): self.spot.strafe_right(),
+            ord('q'): self.spot.turn_left(),
+            ord('e'): self.spot.turn_right(),
+            ord('L'): self._toggle_lease,
         }
-        self._locked_messages = ['', '', '']  # string: displayed message for user
-        self._exit_check = None
-        self._lease_keep_alive = None
-        self._lock = threading.Lock()
 
-    def start(self, lease_keep_alive):
-        """Begin communication with the robot."""
-        self._lease_keep_alive = lease_keep_alive
+        self.command_descriptions = [
+            '[ESC]  Quit Program', '[P]  Toggle Power', '[L]  Toggle Lease', '[v]  Sit',
+            '[f]  Stand', '[w]  Move Forward', '[s]  Move Backward', '[a]  Strafe Left',
+            '[d]  Strafe Right', '[q]  Turn Left', '[e]  Turn Right'
+        ]
 
-        # Clear existing graph nav map
-        self.spot.graph_nav_client.clear_graph()
+        self.format_GUI()
 
-    def shutdown(self):
-        """Shutdown the interface."""
-        self.spot.shutdown()
+    # noinspection PyUnresolvedReferences
+    def format_GUI(self):
+        """Create and format GUI window"""
 
-    def _quit_program(self):
-        if self._recording:
-            self._stop_recording()
-        self.shutdown()
-        if self._exit_check is not None:
-            self._exit_check.request_exit()
+        # Main window widget
+        window_widget = WindowWidget()
+        window_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
+        window_widget.key_pressed.connect(self._drive_command)
+        self.window_layout = QtWidgets.QVBoxLayout()
+        window_widget.setLayout(self.window_layout)
+        self.setCentralWidget(window_widget)
 
-    def __del__(self):
-        self.shutdown()
+        # Add main panels for recording autowalk
+        self.format_top_panel()
+        self.format_left_panel()
+        self.format_right_panel()
 
-    def flush_and_estop_buffer(self, screen):
-        """Manually flush the curses input buffer but trigger any estop requests (space)"""
-        key = ''
-        while key != -1:
-            key = screen.getch()
-            if key == ord(' '):
-                self.spot.toggle_estop()
+        content_widget = QtWidgets.QWidget()
+        content_widget_layout = QtWidgets.QHBoxLayout()
+        content_widget.setLayout(content_widget_layout)
+        content_widget_layout.addWidget(self.left_panel_widget)
+        content_widget_layout.addStretch()
+        content_widget_layout.addWidget(self.right_panel_widget)
 
-    def add_message(self, msg_text):
-        """Display the given message string to the user in the curses interface."""
-        with self._lock:
-            self._locked_messages = [msg_text] + self._locked_messages[:-1]
+        self.window_layout.addWidget(self.top_panel_widget)
+        self.window_layout.addWidget(content_widget)
 
-    def message(self, idx):
-        """Grab one of the 3 last messages added."""
-        with self._lock:
-            return self._locked_messages[idx]
+        # Signal connections for buttons, sliders, and combo boxes
+        self.action_combobox.activated.connect(self.change_action_panel)
+        self.record_button.clicked.connect(self._toggle_record)
+        self.save_autowalk_button.clicked.connect(self._save_autowalk)
+        self.linear_velocity_slider.valueChanged.connect(self._change_linear_velocity)
+        self.angular_velocity_slider.valueChanged.connect(self._change_angular_velocity)
+        self.command_duration_slider.valueChanged.connect(self._change_command_duration)
+        self.pose_pitch_slider.sliderReleased.connect(self._change_pose)
+        self.pose_roll_slider.sliderReleased.connect(self._change_pose)
+        self.pose_yaw_slider.sliderReleased.connect(self._change_pose)
+        self.pose_height_slider.sliderReleased.connect(self._change_pose)
+        self.pose_duration_slider.valueChanged.connect(self._change_pose_duration)
+        self.rcam_pitch_slider.sliderReleased.connect(self._change_pose)
+        self.rcam_roll_slider.sliderReleased.connect(self._change_pose)
+        self.rcam_yaw_slider.sliderReleased.connect(self._change_pose)
+        self.rcam_height_slider.sliderReleased.connect(self._change_pose)
+        self.save_action_button.clicked.connect(self._save_action)
+        self.cancel_action_button.clicked.connect(self._cancel_action)
+        self.add_action_button.clicked.connect(self._add_action)
+        self.directory_button.clicked.connect(self._choose_directory)
+        self.cancel_autowalk_button.clicked.connect(self._reset_walk)
+        self.docks_list.itemClicked.connect(self.choose_dock)
 
-    def drive(self, screen):
-        """User interface to control the robot via the passed-in curses screen interface object."""
-        with ExitCheck() as self._exit_check:
-            curses_handler = CursesHandler(self)
-            curses_handler.setLevel(logging.INFO)
-            self.logger.addHandler(curses_handler)
+        self.setWindowTitle('Record Autowalk')
 
-            screen.nodelay(True)  # Don't block for user input.
-            screen.resize(26, 96)
-            screen.refresh()
+    # noinspection PyAttributeOutsideInit
+    def format_top_panel(self):
+        self.top_panel_widget = QtWidgets.QWidget()
+        self.top_panel_layout = QtWidgets.QHBoxLayout()
+        self.top_panel_widget.setLayout(self.top_panel_layout)
 
-            # for debug
-            curses.echo()
+        self.power_label = QtWidgets.QLabel('Powered off', self, alignment=QtCore.Qt.AlignCenter)
+        self.power_label.setStyleSheet('color: red')
+        self.lease_label = QtWidgets.QLabel('Unleased', self, alignment=QtCore.Qt.AlignCenter)
+        self.lease_label.setStyleSheet('color: red')
+        self.directions_label = QtWidgets.QLabel(
+            'Set up and move robot to desired starting position', self)
+        self.directions_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.record_button = QtWidgets.QPushButton('Start Recording', self)
+        self.record_button.setStyleSheet('background-color: green')
 
-            try:
-                while not self._exit_check.kill_now:
-                    self.spot.async_tasks.update()
-                    self._drive_draw(screen, self._lease_keep_alive)
+        self.top_panel_layout.addWidget(self.lease_label)
+        self.top_panel_layout.addWidget(self.power_label)
+        self.top_panel_layout.addStretch()
+        self.top_panel_layout.addWidget(self.directions_label)
+        self.top_panel_layout.addStretch()
+        self.top_panel_layout.addWidget(self.record_button)
 
-                    try:
-                        cmd = screen.getch()
-                        # Do not queue up commands on client
-                        self.flush_and_estop_buffer(screen)
-                        self._drive_cmd(cmd)
-                        time.sleep(COMMAND_INPUT_RATE)
-                    except Exception:
-                        # On robot command fault, sit down safely before killing the program.
-                        self.spot.safe_power_off()
-                        time.sleep(2.0)
-                        self.shutdown()
-                        raise
+    # noinspection PyAttributeOutsideInit
+    def format_left_panel(self):
+        """ Creates left panel widget with available actions, statuses, and speed controls"""
+        self.left_panel_widget = QtWidgets.QWidget()
+        self.left_panel_layout = QtWidgets.QVBoxLayout()
+        self.left_panel_widget.setLayout(self.left_panel_layout)
 
-            finally:
-                self.logger.removeHandler(curses_handler)
+        self.actions_label_widget = QtWidgets.QLabel(self)
+        self.actions_label_widget.setText('Robot Commands')
+        self.actions_label_widget.setAlignment(QtCore.Qt.AlignCenter)
+        self.actions_list_widget = QtWidgets.QListWidget(self)
+        for description in self.command_descriptions:
+            QtWidgets.QListWidgetItem(description, self.actions_list_widget)
 
-    def _drive_draw(self, screen, lease_keep_alive):
-        """Draw the interface screen at each update."""
-        screen.clear()  # clear screen
-        screen.resize(26, 96)
-        screen.addstr(0, 0, f'{self.spot.robot_id.nickname:20s} {self.spot.robot_id.serial_number}')
-        screen.addstr(1, 0, self._lease_str(lease_keep_alive))
-        screen.addstr(2, 0, self._battery_str())
-        screen.addstr(3, 0, self._estop_str())
-        screen.addstr(4, 0, self._power_state_str())
-        screen.addstr(5, 0, self._time_sync_str())
-        screen.addstr(6, 0, self._waypoint_str())
-        screen.addstr(7, 0, self._fiducial_str())
-        screen.addstr(8, 0, self._desert_str())
-        for i in range(3):
-            screen.addstr(10 + i, 2, self.message(i))
-        screen.addstr(14, 0, 'Commands: [TAB]: quit [j]: Scan                     ')
-        screen.addstr(15, 0, '          [T]: Time-sync, [SPACE]: Estop, [P]: Power')
-        screen.addstr(16, 0, '          [v]: Sit, [f]: Stand, [r]: Self-right     ')
-        screen.addstr(17, 0, '          [wasd]: Directional strafing              ')
-        screen.addstr(18, 0, '          [qe]: Turning, [ESC]: Stop                ')
-        screen.addstr(19, 0, '          [m]: Start recording mission              ')
-        screen.addstr(20, 0, '          [l]: Add fiducial localization to mission ')
-        screen.addstr(21, 0, '          [z]: Enter desert mode                    ')
-        screen.addstr(22, 0, '          [x]: Exit desert mode                     ')
-        screen.addstr(23, 0, '          [g]: Stop recording and generate mission  ')
+        self.linear_velocity_label = QtWidgets.QLabel(f'Speed: {self.linear_velocity:.2f} m/s',
+                                                      self)
+        self.angular_velocity_label = QtWidgets.QLabel(
+            f'Turning speed: {self.angular_velocity:.2f} rad/s', self)
+        self.command_duration_label = QtWidgets.QLabel(
+            f'Sensitivity: {self.command_duration:.2f} s', self)
+        self.linear_velocity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.linear_velocity_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.angular_velocity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.angular_velocity_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.command_duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.command_duration_slider.setValue(SLIDER_MIDDLE_VALUE)
 
-        screen.refresh()
+        self.left_panel_layout.addWidget(self.actions_label_widget)
+        self.left_panel_layout.addWidget(self.actions_list_widget)
+        self.left_panel_layout.addWidget(self.linear_velocity_label)
+        self.left_panel_layout.addWidget(self.linear_velocity_slider)
+        self.left_panel_layout.addWidget(self.angular_velocity_label)
+        self.left_panel_layout.addWidget(self.angular_velocity_slider)
+        self.left_panel_layout.addWidget(self.command_duration_label)
+        self.left_panel_layout.addWidget(self.command_duration_slider)
 
-    def _drive_cmd(self, key):
-        """Run user commands at each update."""
-        try:
-            cmd_function = self._command_dictionary[key]
+    # noinspection PyAttributeOutsideInit
+    def format_right_panel(self):
+        """Creates right panel with autowalk actions and save menu"""
+        self.right_panel_widget = QtWidgets.QWidget()
+        self.right_panel_layout = QtWidgets.QVBoxLayout()
+        self.right_panel_widget.setLayout(self.right_panel_layout)
+        self.right_panel_stacked_widget = QtWidgets.QStackedWidget()
+
+        # Initial panel with welcome message
+        self.initial_panel = QtWidgets.QWidget()
+        self.initial_panel_layout = QtWidgets.QVBoxLayout()
+        self.initial_panel.setLayout(self.initial_panel_layout)
+        self.welcome_message = QtWidgets.QLabel(
+            '''Welcome to the Record Autowalk GUI.\n\nMake sure to remove the E-Stop, acquire a lease, and power on 
+            the robot.\n\nPosition the robot with a fiducial in view before starting the recording.''',
+            self)
+        self.welcome_message.setAlignment(QtCore.Qt.AlignTop)
+        self.welcome_message.setWordWrap(True)
+        self.initial_panel_layout.addWidget(self.welcome_message)
+
+        # Panel with summary of recorded actions
+        self.recorded_panel = QtWidgets.QWidget()
+        self.recorded_panel_layout = QtWidgets.QVBoxLayout()
+        self.recorded_panel.setLayout(self.recorded_panel_layout)
+        self.recorded_label = QtWidgets.QLabel('Currently Saved Actions', self)
+        self.recorded_list = QtWidgets.QListWidget(self)
+        self.add_action_button = QtWidgets.QPushButton('Add Action', self)
+        self.recorded_panel_layout.addWidget(self.recorded_label)
+        self.recorded_panel_layout.addWidget(self.recorded_list)
+        self.recorded_panel_layout.addWidget(self.add_action_button)
+
+        # Action Panels
+        self.action_panel = QtWidgets.QWidget()
+        self.action_panel_layout = QtWidgets.QVBoxLayout()
+        self.action_panel.setLayout(self.action_panel_layout)
+
+        self.action_combobox = QtWidgets.QComboBox(self)
+        self.action_combobox.addItems(['Pose', 'Robot Camera', 'Dock and End Recording', 'Scan'])
+
+        self.format_pose_panel()
+
+        self.format_rcam_panel()
+
+        self.format_docking_panel()
+
+        # Stacking Panels
+        self.stack_widget = QtWidgets.QStackedWidget()
+        self.stack_widget.addWidget(self.pose_panel)
+        self.stack_widget.addWidget(self.rcam_panel)
+        self.stack_widget.addWidget(self.docking_panel)
+
+        self.save_action_button = QtWidgets.QPushButton('Save Action', self)
+        self.cancel_action_button = QtWidgets.QPushButton('Cancel Action', self)
+
+        self.action_panel_layout.addWidget(self.action_combobox)
+        self.action_panel_layout.addWidget(self.stack_widget)
+        self.action_panel_layout.addWidget(self.save_action_button)
+        self.action_panel_layout.addWidget(self.cancel_action_button)
+
+        # Final Panel
+        self.final_panel = QtWidgets.QWidget()
+        self.final_panel_layout = QtWidgets.QVBoxLayout()
+        self.final_panel.setLayout(self.final_panel_layout)
+
+        self.autowalk_name_label = QtWidgets.QLabel('Autowalk Name:', self)
+        self.autowalk_name_line = QtWidgets.QLineEdit()
+        self.directory_button = QtWidgets.QPushButton('Choose Directory', self)
+        self.save_autowalk_button = QtWidgets.QPushButton('Save Autowalk', self)
+        self.cancel_autowalk_button = QtWidgets.QPushButton('Cancel', self)
+        self.final_panel_layout.addWidget(self.autowalk_name_label)
+        self.final_panel_layout.addWidget(self.autowalk_name_line)
+        self.final_panel_layout.addWidget(self.directory_button)
+        self.final_panel_layout.addStretch()
+        self.final_panel_layout.addWidget(self.save_autowalk_button)
+        self.final_panel_layout.addWidget(self.cancel_autowalk_button)
+
+        self.right_panel_stacked_widget.addWidget(self.initial_panel)
+        self.right_panel_stacked_widget.addWidget(self.recorded_panel)
+        self.right_panel_stacked_widget.addWidget(self.action_panel)
+        self.right_panel_stacked_widget.addWidget(self.final_panel)
+
+        self.right_panel_layout.addWidget(self.right_panel_stacked_widget)
+
+    # noinspection PyAttributeOutsideInit
+    def format_pose_panel(self):
+        """Creates pose panel for widgets associated with creating pose action"""
+        self.pose_panel = QtWidgets.QWidget()
+        self.pose_panel_layout = QtWidgets.QVBoxLayout()
+        self.pose_panel.setLayout(self.pose_panel_layout)
+
+        self.pose_name_label = QtWidgets.QLabel('Pose Name', self)
+        self.pose_name_line = QtWidgets.QLineEdit()
+        self.pose_pitch_label = QtWidgets.QLabel('Pitch', self)
+        self.pose_pitch_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.pose_pitch_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.pose_roll_label = QtWidgets.QLabel('Roll', self)
+        self.pose_roll_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.pose_roll_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.pose_yaw_label = QtWidgets.QLabel('Yaw', self)
+        self.pose_yaw_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.pose_yaw_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.pose_height_label = QtWidgets.QLabel('Height', self)
+        self.pose_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.pose_height_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.pose_duration_label = QtWidgets.QLabel('Pose Duration: 5 s', self)
+        self.pose_duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.pose_duration_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.pose_panel_layout.addWidget(self.pose_name_label)
+        self.pose_panel_layout.addWidget(self.pose_name_line)
+        self.pose_panel_layout.addWidget(self.pose_pitch_label)
+        self.pose_panel_layout.addWidget(self.pose_pitch_slider)
+        self.pose_panel_layout.addWidget(self.pose_roll_label)
+        self.pose_panel_layout.addWidget(self.pose_roll_slider)
+        self.pose_panel_layout.addWidget(self.pose_yaw_label)
+        self.pose_panel_layout.addWidget(self.pose_yaw_slider)
+        self.pose_panel_layout.addWidget(self.pose_height_label)
+        self.pose_panel_layout.addWidget(self.pose_height_slider)
+        self.pose_panel_layout.addWidget(self.pose_duration_label)
+        self.pose_panel_layout.addWidget(self.pose_duration_slider)
+        self.pose_panel_layout.addStretch()
+
+    # noinspection PyAttributeOutsideInit
+    def format_rcam_panel(self):
+        """Creates robot camera panel for widgets associated with creating a robot camera action"""
+        self.rcam_panel = QtWidgets.QWidget()
+        self.rcam_layout = QtWidgets.QVBoxLayout()
+        self.rcam_panel.setLayout(self.rcam_layout)
+
+        self.rcam_label = QtWidgets.QLabel(self)
+        self.rcam_label.setText('Picture name:')
+        self.rcam_line = QtWidgets.QLineEdit()
+        self.rcam_pitch_label = QtWidgets.QLabel('Pitch', self)
+        self.rcam_pitch_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.rcam_pitch_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.rcam_roll_label = QtWidgets.QLabel('Roll', self)
+        self.rcam_roll_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.rcam_roll_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.rcam_yaw_label = QtWidgets.QLabel('Yaw', self)
+        self.rcam_yaw_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.rcam_yaw_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.rcam_height_label = QtWidgets.QLabel('Height', self)
+        self.rcam_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+        self.rcam_height_slider.setValue(SLIDER_MIDDLE_VALUE)
+        self.rcam_layout.addWidget(self.rcam_label)
+        self.rcam_layout.addWidget(self.rcam_line)
+        self.rcam_layout.addWidget(self.rcam_pitch_label)
+        self.rcam_layout.addWidget(self.rcam_pitch_slider)
+        self.rcam_layout.addWidget(self.rcam_roll_label)
+        self.rcam_layout.addWidget(self.rcam_roll_slider)
+        self.rcam_layout.addWidget(self.rcam_yaw_label)
+        self.rcam_layout.addWidget(self.rcam_yaw_slider)
+        self.rcam_layout.addWidget(self.rcam_height_label)
+        self.rcam_layout.addWidget(self.rcam_height_slider)
+        self.rcam_layout.addStretch()
+
+    # noinspection PyAttributeOutsideInit
+    def format_docking_panel(self):
+        """Creates docking panel for widgets associated with creating a docking action"""
+        self.docking_panel = QtWidgets.QWidget()
+        self.docking_layout = QtWidgets.QVBoxLayout()
+        self.docking_panel.setLayout(self.docking_layout)
+
+        self.docks_list = QtWidgets.QListWidget(self)
+        self.docking_layout.addWidget(self.docks_list)
+        self.docking_layout.addStretch()
+
+    @staticmethod
+    def _init_walk():
+        """Initialize walk object"""
+
+        walk = walks_pb2.Walk()
+        walk.global_parameters.self_right_attempts = RETRY_COUNT_DEFAULT
+        walk.playback_mode.once.SetInParent()
+        return walk
+
+    def _update_tasks(self):
+        """Updates asynchronous robot state captures"""
+        self._async_tasks.update()
+
+    def _create_element(self, name, waypoint, is_action=True) -> walks_pb2.Element:
+        """Creates default autowalk Element object, populating everything except Action and ActionWrapper"""
+        QtWidgets.QListWidgetItem(name, self.recorded_list)
+        element: walks_pb2.Element = walks_pb2.Element()
+        element.name = name
+        element.target.navigate_to.destination_waypoint_id = waypoint.id
+        element.target.navigate_to.travel_params.max_distance = TRAVEL_MAX_DIST
+        element.target.navigate_to.travel_params.feature_quality_tolerance = (
+            graph_nav_pb2.TravelParams.FeatureQualityTolerance.TOLERANCE_IGNORE_POOR_FEATURE_QUALITY)
+        element.target.navigate_to.travel_params.blocked_path_wait_time.seconds = BLOCKED_PATH_WAIT_TIME
+        element.target_failure_behavior.retry_count = RETRY_COUNT_DEFAULT
+        element.target_failure_behavior.prompt_duration.seconds = PROMPT_DURATION_DEFAULT
+        element.target_failure_behavior.proceed_if_able.SetInParent()
+        if is_action:
+            element.action_failure_behavior.retry_count = RETRY_COUNT_DEFAULT
+            element.action_failure_behavior.prompt_duration.seconds = PROMPT_DURATION_DEFAULT
+            element.action_failure_behavior.proceed_if_able.SetInParent()
+        element.battery_monitor.battery_start_threshold = BATTERY_THRESHOLDS[0]
+        element.battery_monitor.battery_stop_threshold = BATTERY_THRESHOLDS[1]
+        return element
+
+    def _save_action(self):
+        """Save autowalk action by modifying walk object"""
+        # Create waypoint at action location
+        waypoint_response = self._recording_client.create_waypoint()
+
+        element = walks_pb2.Element()
+        if self.action_combobox.currentIndex() == POSE_INDEX:
+            element = self._create_element(self.pose_name_line.text().strip(),
+                                           waypoint_response.created_waypoint)
+            element.action.sleep.duration.seconds = int(
+                self.pose_duration_slider.value() / 10)  # Creates range of 0-9 seconds
+            element.action_wrapper.robot_body_pose.target_tform_body.position.SetInParent()
+            element.action_wrapper.robot_body_pose.target_tform_body.rotation.CopyFrom(
+                self.euler_angles.to_quaternion())
+            position = geometry_pb2.Vec3()
+            position.z = self.robot_height
+            element.action_wrapper.robot_body_pose.target_tform_body.position.CopyFrom(position)
+
+        elif self.action_combobox.currentIndex() == ROBOT_CAMERA_INDEX:
+            action_name = self.rcam_line.text().strip()
+            element = self._create_element(action_name, waypoint_response.created_waypoint)
+            daq = AcquireDataRequest()
+            daq.action_id.action_name = action_name
+            for img_source in IMAGE_SOURCES:
+                img_request = ImageSourceCapture()
+                img_request.image_service = 'image'
+                img_request.image_source = img_source
+                img_request.pixel_format = image_pb2.Image.PIXEL_FORMAT_GREYSCALE_U8
+                daq.acquisition_requests.image_captures.append(img_request)
+
+            data_capture_types = [
+                'robot-id', 'robot-state', 'detected-objects', 'detailed-position-data',
+                'basic-position-data'
+            ]
+            for data_type in data_capture_types:
+                data_request = DataCapture()
+                data_request.name = data_type
+                daq.acquisition_requests.data_captures.append(data_request)
+            element.action.data_acquisition.acquire_data_request.CopyFrom(daq)
+            element.action.data_acquisition.completion_behavior = nodes_pb2.DataAcquisition.COMPLETE_AFTER_SAVED
+
+            element.action_wrapper.robot_body_pose.target_tform_body.position.SetInParent()
+            element.action_wrapper.robot_body_pose.target_tform_body.rotation.CopyFrom(
+                self.euler_angles.to_quaternion())
+            position = geometry_pb2.Vec3()
+            position.z = self.robot_height
+            element.action_wrapper.robot_body_pose.target_tform_body.position.CopyFrom(position)
+
+        elif self.action_combobox.currentIndex() == DOCK_INDEX:
+            if not self.dock:
+                return
+            end_dock = walks_pb2.Dock()
+            end_dock.dock_id = self.dock
+
+            # Create waypoint at prep pose before docking
+            dock_prep_waypoint = self._recording_client.create_waypoint()
+            dock_target = walks_pb2.Target()
+            dock_target.navigate_to.destination_waypoint_id = dock_prep_waypoint.created_waypoint.id
+            dock_target.navigate_to.travel_params.max_distance = TRAVEL_MAX_DIST
+            dock_target.navigate_to.travel_params.feature_quality_tolerance = (
+                graph_nav_pb2.TravelParams.FeatureQualityTolerance.TOLERANCE_IGNORE_POOR_FEATURE_QUALITY)
+            dock_target.navigate_to.travel_params.blocked_path_wait_time.seconds = BLOCKED_PATH_WAIT_TIME
+            end_dock.target_prep_pose.CopyFrom(dock_target)
+
+            # Try to dock the robot
+            timeout = 30
+            converter = self.robot.time_sync.get_robot_time_converter()
+            start_time = converter.robot_seconds_from_local_seconds(now_sec())
+            cmd_end_time = start_time + timeout
+
+            self._docking_client.docking_command_full(
+                self.dock, self.robot.time_sync.endpoint.clock_identifier,
+                seconds_to_timestamp(cmd_end_time), docking_pb2.PREP_POSE_SKIP_POSE)
+
+            # Create last waypoint on top of dock
+            dock_waypoint = self._recording_client.create_waypoint()
+            end_dock.docked_waypoint_id = dock_waypoint.created_waypoint.id
+            end_dock.prompt_duration.seconds = PROMPT_DURATION_DOCK
+            self.walk.docks.append(end_dock)
+
+            self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
+            self.dock_and_end_recording = True
+            QtWidgets.QListWidgetItem('Dock and Finish', self.recorded_list)
+            return
+        elif self.action_combobox.currentIndex() == SCAN_INDEX:
+            scan_element = self._create_element('Scan', waypoint_response.created_waypoint)
+            self._scan_action(scan_element.action)
+
+            sleep_element = self._create_element('Sleep', waypoint_response.created_waypoint)
+            sleep_element.action.sleep.duration.seconds = 30
+
+            stop_element = self._create_element('Stop Scan', waypoint_response.created_waypoint)
+            self._stop_scan_action(stop_element.action)
+
+            self.elements.append(scan_element)
+            self.elements.append(sleep_element)
+            self.elements.append(stop_element)
+            self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
+            return
+
+        self.elements.append(element)
+        self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
+
+    @staticmethod
+    def _scan_action(action):
+        action.service_name = DIRECTORY_NAME
+
+        params = service_customization.DictParam.Spec()
+        child_spec = service_customization.DictParam.ChildSpec()
+        action_param = service_customization.CustomParam.Spec()
+        action_param.string_spec = service_customization.StringParam.Spec()
+        child_spec.spec = action_param
+        params.specs['action'] = child_spec
+        action.parameters.spec.CopyFrom(params)
+
+        values = service_customization.DictParam()
+        values.values['action'] = 'capture'
+        action.parameters.values.CopyFrom(values)
+
+        action.rpc_timeout.CopyFrom(Duration(seconds=10))
+
+    def _stop_scan_action(self, action):
+        action.service_name = DIRECTORY_NAME
+
+        params = service_customization.DictParam.Spec()
+        child_spec = service_customization.DictParam.ChildSpec()
+        action_param = service_customization.CustomParam.Spec()
+        action_param.string_spec = service_customization.StringParam.Spec()
+        child_spec.spec = action_param
+        params.specs['action'] = child_spec
+        action.parameters.spec.CopyFrom(params)
+
+        values = service_customization.DictParam()
+        values.values['action'] = 'stop-capture'
+        action.parameters.values.CopyFrom(values)
+
+        action.rpc_timeout.CopyFrom(Duration(seconds=10))
+
+    def _save_autowalk(self):
+        """Save autowalk in directory"""
+        if not self.dock_and_end_recording:
+            # Creates end waypoint and action if the last action is not docking
+            self._toggle_record()
+            waypoint_response = self._recording_client.create_waypoint()
+            end_element = self._create_element('End Recording', waypoint_response.created_waypoint,
+                                               is_action=False)
+            self.elements.append(end_element)
+            self._toggle_record()
+
+        walk_name = self.autowalk_name_line.text().strip()
+        self.walk.mission_name = walk_name
+
+        # Creates walk directory and saves autowalk in format
+        walk_directory = os.path.join(self.directory, f'{walk_name}.walk')
+        directory_copy_number = 0
+        while os.path.isdir(walk_directory):
+            # Appends (number) to folder name if folder with existing name exists
+            directory_copy_number += 1
+            walk_directory = os.path.join(self.directory,
+                                          walk_name + f'{walk_name}({directory_copy_number}).walk')
+        self._graph_nav_client.write_graph_and_snapshots(walk_directory)
+        self.walk.elements.extend(self.elements)
+        mission_directory = os.path.join(walk_directory, 'missions')
+        os.mkdir(mission_directory)
+        with open(os.path.join(mission_directory, 'autogenerated.walk'), 'wb') as autowalk_file:
+            autowalk_file.write(self.walk.SerializeToString())
+
+        self._reset_walk()
+
+    def _reset_walk(self):
+        """Resets walk parameters and GUI"""
+        self.right_panel_stacked_widget.setCurrentIndex(INITIAL_PANEL)
+        self.walk = self._init_walk()
+        self.directions_label.setText('Set up and move robot to desired starting position')
+        self.record_button.setText('Start Recording')
+        self.recorded_list.clear()
+        self.resumed_recording = False
+        self.dock_and_end_recording = False
+        self._graph_nav_client.clear_graph()
+
+    def _drive_command(self, key):
+        """Maps keyboard input to robot commands"""
+        if key and ord(key) in self.command_to_function:
+            cmd_function = self.command_to_function[ord(key)]
             cmd_function()
 
-        except KeyError:
-            if key and key != -1 and key < 256:
-                self.add_message(f'Unrecognized keyboard command: \'{chr(key)}\'')
+    def change_action_panel(self, index):
+        """Looks for fiducials before opening docking panel"""
+        self.stack_widget.setCurrentIndex(index)
+        if index == DOCK_INDEX:
+            # Get all fiducial objects (an object of a specific type).
+            self.docks_list.clear()
+            request_fiducials = [world_object_pb2.WORLD_OBJECT_DOCK]
+            self.fiducial_objects = self._world_object_client.list_world_objects(
+                object_type=request_fiducials).world_objects
+            for fiducial in self.fiducial_objects:
+                QtWidgets.QListWidgetItem(str(fiducial.dock_properties.dock_id), self.docks_list)
+
+    def choose_dock(self, item):
+        """Initializes dock selection"""
+        self.dock = int(item.text())
+
+    def _change_pose(self):
+        if self.stack_widget.currentIndex() == POSE_INDEX:
+            pitch = np.radians(self.pose_pitch_slider.value() - SLIDER_MIDDLE_VALUE)
+            roll = np.radians(self.pose_roll_slider.value() - SLIDER_MIDDLE_VALUE)
+            yaw = np.radians(self.pose_yaw_slider.value() - SLIDER_MIDDLE_VALUE)
+            self.robot_height = (
+                                        self.pose_height_slider.value() - SLIDER_MIDDLE_VALUE
+                                ) * 0.003 - 0.15  # Maps to range (-0.15,0.15) meters from normal height
+        else:
+            pitch = np.radians(self.rcam_pitch_slider.value() - SLIDER_MIDDLE_VALUE)
+            roll = np.radians(self.rcam_roll_slider.value() - SLIDER_MIDDLE_VALUE)
+            yaw = np.radians(self.rcam_yaw_slider.value() - SLIDER_MIDDLE_VALUE)
+            self.robot_height = (
+                                        self.rcam_height_slider.value() - SLIDER_MIDDLE_VALUE
+                                ) * 0.003 - 0.15  # Maps to range (-0.15,0.15) meters from normal height
+        self.euler_angles = geometry.EulerZXY(yaw=yaw, roll=roll, pitch=pitch)
+        self._pose_command()
+
+    def _change_pose_duration(self):
+        val = int(
+            self.pose_duration_slider.value() / 10)  # Creates a range between 0 and 10 seconds
+        self.pose_duration_label.setText(f'Pose Duration: {val} s')
+
+    def _change_linear_velocity(self, value):
+        self.linear_velocity = value / 100  # Creates a range between 0 and 1 m/s
+        self.linear_velocity_label.setText(f'Speed: {self.linear_velocity:.2f} m/s')
+
+    def _change_angular_velocity(self, value):
+        self.angular_velocity = value / 100  # Creates a range between 0 and 1 rad/s
+        self.angular_velocity_label.setText(f'Turning speed: {self.angular_velocity:.2f} rad/s')
+
+    def _change_command_duration(self, value):
+        self.command_duration = value / 100  # Creates a range between 0 and 1 seconds
+        self.command_duration_label.setText(f'Sensitivity: {self.command_duration:.2f} s')
 
     @property
     def robot_state(self):
-        """Return the current robot state."""
-        return self.spot.robot_state
+        """Get latest robot state proto."""
+        return self._robot_state_task.proto
 
-    @property
-    def robot(self):
-        return self.spot.robot
-
-    def _power_state(self):
-        state = self.robot_state
-        if not state:
+    @staticmethod
+    def _try_grpc(desc, thunk):
+        try:
+            return thunk()
+        except (ResponseError, RpcError, LeaseBaseError) as err:
+            print(f'Failed {desc}: {err}')
             return None
-        return state.power_state.motor_power_state
 
     @staticmethod
-    def _lease_str(lease_keep_alive):
-        alive = 'RUNNING' if lease_keep_alive.is_alive() else 'STOPPED'
-        lease_proto = lease_keep_alive.lease_wallet.get_lease_state().lease_original.lease_proto
-        lease = f'{lease_proto.resource}:{lease_proto.sequence}'
-        return f'Lease {lease} THREAD:{alive}'
+    def _try_grpc_async(desc, thunk):
 
-    def _power_state_str(self):
-        power_state = self._power_state()
-        if power_state is None:
-            return ''
-        state_str = robot_state_proto.PowerState.MotorPowerState.Name(power_state)
-        return f'Power: {state_str[6:]}'  # get rid of STATE_ prefix
-
-    def _estop_str(self):
-        if not self.spot.estop_client:
-            thread_status = 'NOT ESTOP'
-        else:
-            thread_status = 'RUNNING' if self.spot.estop_keep_alive else 'STOPPED'
-        estop_status = '??'
-        state = self.robot_state
-        if state:
-            for estop_state in state.estop_states:
-                if estop_state.type == estop_state.TYPE_SOFTWARE:
-                    estop_status = estop_state.State.Name(estop_state.state)[6:]  # s/STATE_//
-                    break
-        return f'Estop {estop_status} (thread: {thread_status})'
-
-    def _time_sync_str(self):
-        if not self.robot.time_sync:
-            return 'Time sync: (none)'
-        if self.robot.time_sync.stopped:
-            status = 'STOPPED'
-            exception = self.robot.time_sync.thread_exception
-            if exception:
-                status = f'{status} Exception: {exception}'
-        else:
-            status = 'RUNNING'
-        try:
-            skew = self.robot.time_sync.get_robot_clock_skew()
-            if skew:
-                skew_str = f'offset={duration_str(skew)}'
-            else:
-                skew_str = '(Skew undetermined)'
-        except (TimeSyncError, RpcError) as err:
-            skew_str = f'({err})'
-        return f'Time sync: {status} {skew_str}'
-
-    def _waypoint_str(self):
-        state = self.spot.graph_nav_client.get_localization_state()
-        try:
-            self._waypoint_id = state.localization.waypoint_id
-            if self._waypoint_id == '':
-                self._waypoint_id = 'NONE'
-
-        except:
-            self._waypoint_id = 'ERROR'
-
-        if self._recording and self._waypoint_id != 'NONE' and self._waypoint_id != 'ERROR':
-            if self._waypoint_id not in self._desert_flag:
-                self._desert_flag[self._waypoint_id] = self._desert_mode
-            return f'Current waypoint: {self._waypoint_id} [ RECORDING ]'
-
-        return f'Current waypoint: {self._waypoint_id}'
-
-    def _fiducial_str(self):
-        return f'Visible fiducials: {str(self.spot.count_visible_fiducials())}'
-
-    def _desert_str(self):
-        if self._desert_mode:
-            return '[ FEATURE DESERT MODE ]'
-        else:
-            return ''
-
-    def _battery_str(self):
-        if not self.robot_state:
-            return ''
-        battery_state = self.robot_state.battery_states[0]
-        status = battery_state.Status.Name(battery_state.status)
-        status = status[7:]  # get rid of STATUS_ prefix
-        if battery_state.charge_percentage.value:
-            bar_len = int(battery_state.charge_percentage.value) // 10
-            bat_bar = f'|{"=" * bar_len}{" " * (10 - bar_len)}|'
-        else:
-            bat_bar = ''
-        time_left = ''
-        if battery_state.estimated_runtime:
-            time_left = f'({secs_to_hms(battery_state.estimated_runtime.seconds)})'
-        return f'Battery: {status}{bat_bar} {time_left}'
-
-    def _start_recording(self):
-        """Start recording a map."""
-        if self.spot.count_visible_fiducials() == 0:
-            self.add_message('ERROR: Can\'t start recording -- No fiducials in view.')
-            return
-
-        if self._waypoint_id is None:
-            self.add_message('ERROR: Not localized to waypoint.')
-            return
-        session_name = os.path.basename(self._download_filepath)
-        # Create metadata for the recording session.
-        client_metadata = GraphNavRecordingServiceClient.make_client_metadata(
-            session_name=session_name, client_username=self.robot._current_user,
-            client_id='Mission Recorder Example', client_type='Python SDK')
-        environment = GraphNavRecordingServiceClient.make_recording_environment(
-            waypoint_env=GraphNavRecordingServiceClient.make_waypoint_environment(
-                client_metadata=client_metadata))
-        # Tell graph nav to start recording map
-        status = self.spot.recording_client.start_recording(recording_environment=environment)
-        if status != recording_pb2.StartRecordingResponse.STATUS_OK:
-            self.add_message('Start recording failed.')
-            return
-
-        self.add_message('Started recording map.')
-        self._graph = None
-        self._all_graph_wps_in_order = []
-        state = self.spot.graph_nav_client.get_localization_state()
-        if '' == state.localization.waypoint_id:
-            self.add_message('No localization after start recording.')
-            self.spot.recording_client.stop_recording()
-            return
-        self._waypoint_commands = []
-        # Treat this sort of like RPN / postfix, where operators follow their operands.
-        # waypoint_id LOCALIZE means "localize to waypoint_id".
-        # INITIALIZE takes no argument.
-        # Implicitly, we make routes between pairs of waypoint ids as they occur.
-        # `w0 w1 LOCALIZE w2` will give a route w0->w1, whereupon we localize,
-        # and then a route w1->w2.
-        self._waypoint_commands.append('INITIALIZE')
-        # Start with the first waypoint.
-        self._waypoint_commands.append(state.localization.waypoint_id)
-        self._recording = True
-
-    def _stop_recording(self):
-        """Stop or pause recording a map."""
-        if not self._recording:
-            return True
-        self._recording = False
-
-        if self._waypoint_id != self._waypoint_commands[-1]:
-            self._waypoint_commands += [self._waypoint_id]
-
-        try:
-            finished_recording = False
-            status = recording_pb2.StopRecordingResponse.STATUS_UNKNOWN
-            while True:
-                try:
-                    status = self.spot.recording_client.stop_recording()
-                except NotReadyYetError:
-                    # The recording service always takes some time to complete. stop_recording
-                    # must be called multiple times to ensure recording has finished.
-                    self.add_message('Stopping...')
-                    time.sleep(1.0)
-                    continue
-                break
-
-            self.add_message('Successfully stopped recording a map.')
-            return True
-
-        except NotLocalizedToEndError:
-            # This should never happen unless there's an internal error on the robot.
-            self.add_message(
-                'There was a problem while trying to stop recording. Please try again.')
-            return False
-
-    def _relocalize(self):
-        """Insert localization node into mission."""
-        if not self._recording:
-            print('Not recording mission.')
-            return False
-
-        self.add_message('Adding fiducial localization to mission.')
-        self._waypoint_commands += [self._waypoint_id]
-        self._waypoint_commands += ['LOCALIZE']
-
-        # Return to waypoint (in case localization shifted to another waypoint)
-        self._waypoint_commands += [self._waypoint_id]
-        return True
-
-    def _scan(self):
-        """Insert scan node into mission."""
-        if not self._recording:
-            print('Not recording mission.')
-            return False
-
-        self.add_message('Adding scan to mission.')
-        self._waypoint_commands += [self._waypoint_id]
-        self._waypoint_commands += ['SCAN']
-
-        # Return to waypoint (in case localization shifted to another waypoint)
-        self._waypoint_commands += [self._waypoint_id]
-        return True
-
-    def _enter_desert(self):
-        self._desert_mode = True
-        if self._recording:
-            if self._waypoint_commands == [] or self._waypoint_commands[-1] != self._waypoint_id:
-                self._waypoint_commands += [self._waypoint_id]
-
-    def _exit_desert(self):
-        self._desert_mode = False
-        if self._recording:
-            if self._waypoint_commands == [] or self._waypoint_commands[-1] != self._waypoint_id:
-                self._waypoint_commands += [self._waypoint_id]
-
-    def _generate_mission(self):
-        """Save graph map and mission file."""
-
-        # Check whether mission has been recorded
-        if not self._recording:
-            self.add_message('ERROR: No mission recorded.')
-            return
-
-        # Check for empty mission
-        if len(self._waypoint_commands) == 0:
-            self.add_message('ERROR: No waypoints in mission.')
-            return
-
-        # Stop recording mission
-        if not self._stop_recording():
-            self.add_message('ERROR: Error while stopping recording.')
-            return
-
-        # Save graph map
-        os.mkdir(self._download_filepath)
-        if not self._download_full_graph():
-            self.add_message('ERROR: Error downloading graph.')
-            return
-
-        # Generate mission
-        mission = self._make_mission()
-
-        # Save mission file
-        os.mkdir(os.path.join(self._download_filepath, 'missions'))
-        mission_filepath = os.path.join(self._download_filepath, 'missions', 'autogenerated')
-        write_mission(mission, mission_filepath)
-
-        self.logger.info('Mission saved to %s', mission_filepath)
-
-        # Quit program
-        self._quit_program()
-
-    @staticmethod
-    def _make_desert(waypoint):
-        waypoint.annotations.scan_match_region.empty.CopyFrom(
-            map_pb2.Waypoint.Annotations.LocalizeRegion.Empty())
-
-    def _download_full_graph(self, overwrite_desert_flag=None):
-        """Download the graph and snapshots from the robot."""
-        graph = self.spot.graph_nav_client.download_graph()
-        if graph is None:
-            self.add_message('Failed to download the graph.')
-            return False
-
-        if overwrite_desert_flag is not None:
-            for wp in graph.waypoints:
-                if wp.id in overwrite_desert_flag:
-                    # Overwrite anything that we passed in.
-                    self._desert_flag[wp.id] = overwrite_desert_flag[wp.id]
-                elif wp.id not in self._desert_flag:
-                    self._desert_flag[wp.id] = False
-
-        # Mark desert waypoints
-        for waypoint in graph.waypoints:
-            if self._desert_flag[waypoint.id]:
-                self._make_desert(waypoint)
-
-        # Write graph map
-        self._write_full_graph(graph)
-        self.add_message(
-            f'Graph downloaded with {len(graph.waypoints)} waypoints and {len(graph.edges)} edges')
-
-        # Download the waypoint and edge snapshots.
-        self._download_and_write_waypoint_snapshots(graph.waypoints)
-        self._download_and_write_edge_snapshots(graph.edges)
-
-        # Cache a list of all graph waypoints, ordered by creation time.
-        # Because we only record one (non-branching) chain, all possible routes are contained
-        # in ranges in this list.
-        self._graph = graph
-        wp_to_time = []
-        for wp in graph.waypoints:
-            _time = wp.annotations.creation_time.seconds + wp.annotations.creation_time.nanos / 1e9
-            wp_to_time.append((wp.id, _time))
-        # Switch inner and outer grouping and grab only the waypoint names after sorting by time.
-        self._all_graph_wps_in_order = list(zip(*sorted(wp_to_time, key=lambda x: x[1])))[0]
-
-        return True
-
-    def _write_full_graph(self, graph):
-        """Download the graph from robot to the specified, local filepath location."""
-        graph_bytes = graph.SerializeToString()
-        write_bytes(self._download_filepath, 'graph', graph_bytes)
-
-    def _download_and_write_waypoint_snapshots(self, waypoints):
-        """Download the waypoint snapshots from robot to the specified, local filepath location."""
-        num_waypoint_snapshots_downloaded = 0
-        for waypoint in waypoints:
+        def on_future_done(fut):
             try:
-                waypoint_snapshot = self.spot.graph_nav_client.download_waypoint_snapshot(
-                    waypoint.snapshot_id)
-            except Exception:
-                # Failure in downloading waypoint snapshot. Continue to next snapshot.
-                self.add_message(f'Failed to download waypoint snapshot: {waypoint.snapshot_id}')
-                continue
-            write_bytes(os.path.join(self._download_filepath, 'waypoint_snapshots'),
-                        waypoint.snapshot_id, waypoint_snapshot.SerializeToString())
-            num_waypoint_snapshots_downloaded += 1
-            self.add_message(
-                f'Downloaded {num_waypoint_snapshots_downloaded} of the total {len(waypoints)} waypoint snapshots.'
-            )
+                fut.result()
+            except (ResponseError, RpcError, LeaseBaseError) as err:
+                print(f'Failed {desc}: {err}')
+                return None
 
-    def _download_and_write_edge_snapshots(self, edges):
-        """Download the edge snapshots from robot to the specified, local filepath location."""
-        num_edge_snapshots_downloaded = 0
-        num_to_download = 0
-        for edge in edges:
-            if len(edge.snapshot_id) == 0:
-                continue
-            num_to_download += 1
-            try:
-                edge_snapshot = self.spot.graph_nav_client.download_edge_snapshot(edge.snapshot_id)
-            except Exception:
-                # Failure in downloading edge snapshot. Continue to next snapshot.
-                self.add_message(f'Failed to download edge snapshot: {edge.snapshot_id}')
-                continue
-            write_bytes(os.path.join(self._download_filepath, 'edge_snapshots'), edge.snapshot_id,
-                        edge_snapshot.SerializeToString())
-            num_edge_snapshots_downloaded += 1
-            self.add_message(
-                f'Downloaded {num_edge_snapshots_downloaded} of the total {num_to_download} edge snapshots.'
-            )
+        future = thunk()
+        future.add_done_callback(on_future_done)
 
-    def _auto_close_loops(self):
-        """Automatically find and close all loops in the graph."""
-        close_fiducial_loops = True
-        close_odometry_loops = True
-        response = self.spot.map_processing_client.process_topology(
-            params=map_processing_pb2.ProcessTopologyRequest.Params(
-                do_fiducial_loop_closure=wrappers.BoolValue(value=close_fiducial_loops),
-                do_odometry_loop_closure=wrappers.BoolValue(value=close_odometry_loops)),
-            modify_map_on_server=True)
-        self.add_message(f'Created {len(response.new_subgraph.edges)} new edge(s).')
+    def _choose_directory(self):
+        """Opens directory selection dialog"""
+        self.directory = str(QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Directory'))
 
-    def _make_mission(self) -> nodes_pb2.Node:
-        """ Create a mission that visits each waypoint on stored path."""
+    def _add_action(self):
+        """Opens action selection panel"""
+        self.right_panel_stacked_widget.setCurrentIndex(ACTION_PANEL)
 
-        self.add_message(f'Mission: {self._waypoint_commands}')
+    def _cancel_action(self):
+        """Goes back to action summary panel"""
+        self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
 
-        # Create a Sequence that visits all the waypoints.
-        sequence = nodes_pb2.Sequence()
+    def _quit_program(self):
+        """Settles robot before exiting"""
+        if self._lease_keepalive:
+            self._lease_keepalive.shutdown()
+        self.close()
 
-        prev_waypoint_command = None
-        first_waypoint = True
-        for waypoint_command in self._waypoint_commands:
-            if waypoint_command == 'LOCALIZE':
-                if prev_waypoint_command is None:
-                    raise RuntimeError('No prev waypoint; LOCALIZE')
-                sequence.children.add().CopyFrom(self._make_localize_node(prev_waypoint_command))
-            elif waypoint_command == 'SCAN':
-                if prev_waypoint_command is None:
-                    raise RuntimeError('No prev waypoint; SCAN')
-                sequence.children.add().CopyFrom(self._make_scan_node(prev_waypoint_command))
-            elif waypoint_command == 'INITIALIZE':
-                # Initialize to any fiducial.
-                sequence.children.add().CopyFrom(self._make_initialize_node())
-            else:
-                if first_waypoint:
-                    # Go to the beginning of the mission using any path. May be a no-op.
-                    sequence.children.add().CopyFrom(self._make_goto_node(waypoint_command))
+    def _toggle_record(self):
+        """toggle recording on/off. Initial state is OFF"""
+        if self._recording_client is not None:
+            recording_status = self._recording_client.get_record_status()
+
+            if not recording_status.is_recording:
+                # Start recording map
+                start_recording_response = self._recording_client.start_recording_full()
+                if start_recording_response.status != recording_pb2.StartRecordingResponse.STATUS_OK:
+                    print(f'Error starting recording (status = {start_recording_response.status}).')
+                    return False
                 else:
-                    if prev_waypoint_command is None:
-                        raise RuntimeError(f'No prev waypoint; route to {waypoint_command}')
-                    sequence.children.add().CopyFrom(
-                        self._make_go_route_node(prev_waypoint_command, waypoint_command))
-                prev_waypoint_command = waypoint_command
-                first_waypoint = False
+                    self.record_button.setText('Stop Recording')
+                    self.record_button.setStyleSheet('background-color: red')
+                    self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
+                    self.directions_label.setText('Create and record actions for Autowalk')
+                    if not self.resumed_recording:
+                        del self.walk.elements[:]
+                        start_element = self._create_element(
+                            'Start', start_recording_response.created_waypoint, is_action=False)
+                        self.elements.append(start_element)
 
-        # Return a Node with the Sequence.
-        ret = nodes_pb2.Node()
-        ret.name = f'Visit {len(self._waypoint_commands):d} goals'
-        ret.impl.Pack(sequence)
-        return ret
-
-    @staticmethod
-    def _make_goto_node(waypoint_id):
-        """ Create a leaf node that will go to the waypoint. """
-        ret = nodes_pb2.Node()
-        ret.name = f'goto {waypoint_id}'
-        vel_limit = NAV_VELOCITY_LIMITS
-
-        # We don't actually know which path we will plan. It could have many feature deserts.
-        # So, let's just allow feature deserts.
-        tolerance = graph_nav_pb2.TravelParams.TOLERANCE_IGNORE_POOR_FEATURE_QUALITY
-        travel_params = graph_nav_pb2.TravelParams(velocity_limit=vel_limit,
-                                                   feature_quality_tolerance=tolerance)
-
-        impl = nodes_pb2.BosdynNavigateTo(travel_params=travel_params)
-        impl.destination_waypoint_id = waypoint_id
-        ret.impl.Pack(impl)
-        return ret
-
-    def _make_go_route_node(self, prev_waypoint_id, waypoint_id):
-        """ Create a leaf node that will go to the waypoint along a route. """
-        ret = nodes_pb2.Node()
-        ret.name = f'go route {prev_waypoint_id} -> {waypoint_id}'
-        vel_limit = NAV_VELOCITY_LIMITS
-
-        if prev_waypoint_id not in self._all_graph_wps_in_order:
-            raise RuntimeError(f'{prev_waypoint_id} (FROM) not in {self._all_graph_wps_in_order}')
-        if waypoint_id not in self._all_graph_wps_in_order:
-            raise RuntimeError(f'{waypoint_id} (TO) not in {self._all_graph_wps_in_order}')
-        prev_wp_idx = self._all_graph_wps_in_order.index(prev_waypoint_id)
-        wp_idx = self._all_graph_wps_in_order.index(waypoint_id)
-
-        impl = nodes_pb2.BosdynNavigateRoute()
-        backwards = False
-        if wp_idx >= prev_wp_idx:
-            impl.route.waypoint_id[:] = self._all_graph_wps_in_order[prev_wp_idx:wp_idx + 1]
-        else:
-            backwards = True
-            # Switch the indices and reverse the output order.
-            impl.route.waypoint_id[:] = reversed(
-                self._all_graph_wps_in_order[wp_idx:prev_wp_idx + 1])
-        edge_ids = [e.id for e in self._graph.edges]
-        for i in range(len(impl.route.waypoint_id) - 1):
-            eid = map_pb2.Edge.Id()
-            # Because we only record one (non-branching) chain, and we only create routes from
-            # older to newer waypoints, we can just follow the time-sorted list of all waypoints.
-            if backwards:
-                from_i = i + 1
-                to_i = i
             else:
-                from_i = i
-                to_i = i + 1
-            eid.from_waypoint = impl.route.waypoint_id[from_i]
-            eid.to_waypoint = impl.route.waypoint_id[to_i]
-            impl.route.edge_id.extend([eid])
-            if eid not in edge_ids:
-                raise RuntimeError(f'Was map recorded in linear chain? {eid} not in graph')
+                # Stop recording map
+                while True:
+                    try:
+                        # For some reason it doesn't work the first time, no matter what
+                        stop_status = self._recording_client.stop_recording()
+                        if stop_status != recording_pb2.StopRecordingResponse.STATUS_NOT_READY_YET:
+                            break
+                    except bosdyn.client.recording.NotReadyYetError:
+                        time.sleep(0.1)
 
-        if any(self._desert_flag[wp_id] for wp_id in impl.route.waypoint_id):
-            tolerance = graph_nav_pb2.TravelParams.TOLERANCE_IGNORE_POOR_FEATURE_QUALITY
-        else:
-            tolerance = graph_nav_pb2.TravelParams.TOLERANCE_DEFAULT
+                if stop_status != recording_pb2.StopRecordingResponse.STATUS_OK:
+                    print(f'Error stopping recording (status = {stop_status}).')
+                    return False
 
-        travel_params = graph_nav_pb2.TravelParams(velocity_limit=vel_limit,
-                                                   feature_quality_tolerance=tolerance)
-        impl.travel_params.CopyFrom(travel_params)
-        ret.impl.Pack(impl)
-        return ret
+                self.resumed_recording = True
+                self.record_button.setText('Resume Recording')
+                self.record_button.setStyleSheet('background-color: orange')
+                self.right_panel_stacked_widget.setCurrentIndex(FINAL_PANEL)
+                self.directions_label.setText('Review and save Autowalk')
 
-    @staticmethod
-    def _make_localize_node(waypoint_id):
-        """Make localization node."""
-        loc = nodes_pb2.Node()
-        loc.name = 'localize robot'
+    def _toggle_lease(self):
+        """toggle lease acquisition. Initial state is acquired"""
+        if self._lease_client is not None:
+            if self._lease_keepalive is None:
+                self._lease_keepalive = LeaseKeepAlive(self._lease_client, must_acquire=True,
+                                                       return_at_exit=True)
+                self.lease_label.setText('Leased')
+                self.lease_label.setStyleSheet('color: green')
+            else:
+                self._lease_keepalive.shutdown()
+                self._lease_keepalive = None
+                self.lease_label.setText('Unleased')
+                self.lease_label.setStyleSheet('color: red')
 
-        impl = nodes_pb2.BosdynGraphNavLocalize()
-        impl.localization_request.fiducial_init = graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NEAREST_AT_TARGET
-        impl.localization_request.initial_guess.waypoint_id = waypoint_id
+    def battery_change_pose(self):
+        self._start_robot_command(
+            'battery_change_pose',
+            RobotCommandBuilder.battery_change_pose_command(
+                dir_hint=basic_command_pb2.BatteryChangePoseCommand.Request.HINT_RIGHT))
 
-        loc.impl.Pack(impl)
-        return loc
+    def _pose_command(self):
+        self._start_robot_command(
+            '',
+            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
+                0, 0, 0, self.robot.get_frame_tree_snapshot(),
+                params=RobotCommandBuilder.mobility_params(body_height=self.robot_height,
+                                                           footprint_R_body=self.euler_angles),
+                body_height=self.robot_height), end_time_secs=time.time() + 1)
 
-    @staticmethod
-    def _make_scan_node(waypoint_id):
-        """Make scan node."""
-        # sequence:
-        #   stand
-        #   RemoteServiceCall: blk-arc
+    # Robot command implementations
+    def _start_robot_command(self, desc, command_proto, end_time_secs=None):
 
+        def _start_command():
+            self._robot_command_client.robot_command(command=command_proto,
+                                                     end_time_secs=end_time_secs)
 
-    @staticmethod
-    def _make_initialize_node():
-        """Make initialization node."""
-        loc = nodes_pb2.Node()
-        loc.name = 'initialize robot'
+        self._try_grpc(desc, _start_command)
 
-        impl = nodes_pb2.BosdynGraphNavLocalize()
-        impl.localization_request.fiducial_init = graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NEAREST
-
-        loc.impl.Pack(impl)
-        return loc
+    def _self_right(self):
+        self._start_robot_command('self_right', RobotCommandBuilder.selfright_command())
