@@ -7,10 +7,34 @@ import logging
 import signal
 import time
 
-from bosdyn.client.async_tasks import AsyncPeriodicQuery
-from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.api.image_pb2 import ImageSource
 
 LOGGER = logging.getLogger()
+
+# Mapping from visual to depth data
+VISUAL_SOURCE_TO_DEPTH_MAP_SOURCE = {
+    'frontleft_fisheye_image': 'frontleft_depth_in_visual_frame',
+    'frontright_fisheye_image': 'frontright_depth_in_visual_frame'
+}
+
+
+def get_img_source_list(image_client):
+    """Gets a list of image sources and filters based on config dictionary
+
+    Args:
+        image_client: Instantiated image client
+    """
+
+    # We are using only the visual images with their corresponding depth sensors
+    sources = image_client.list_image_sources()
+    source_list = []
+    for source in sources:
+        if source.image_type == ImageSource.IMAGE_TYPE_VISUAL:
+            # only append if sensor has corresponding depth sensor
+            if source.name in VISUAL_SOURCE_TO_DEPTH_MAP_SOURCE:
+                source_list.append(source.name)
+                source_list.append(VISUAL_SOURCE_TO_DEPTH_MAP_SOURCE[source.name])
+    return source_list
 
 
 class ExitCheck:
@@ -38,26 +62,6 @@ class ExitCheck:
     def kill_now(self):
         """Return the status of the exit checker indicating if it should exit."""
         return self._kill_now
-
-
-class AsyncRobotState(AsyncPeriodicQuery):
-    """Grab robot state."""
-
-    def __init__(self, robot_state_client: RobotStateClient):
-        super().__init__("robot_state", robot_state_client, LOGGER, period_sec=0.2)
-
-    def _start_query(self):
-        return self._client.get_robot_state_async()
-
-
-def pretty_print_waypoints(waypoint_id, waypoint_name, short_code_to_count, localization_id):
-    short_code = id_to_short_code(waypoint_id)
-    if short_code is None or short_code_to_count[short_code] != 1:
-        short_code = '  '  # If the short code is not valid/unique, don't show it.
-
-    print(
-        "%s Waypoint name: %s id: %s short code: %s" %
-        ('->' if localization_id == waypoint_id else '  ', waypoint_name, waypoint_id, short_code))
 
 
 def update_waypoints_and_edges(graph, localization_id, logger=None):

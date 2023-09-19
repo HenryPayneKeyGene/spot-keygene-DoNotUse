@@ -39,7 +39,7 @@ from bosdyn.util import now_sec, seconds_to_timestamp
 from google.protobuf.duration_pb2 import Duration
 
 from .lidar_service import DIRECTORY_NAME
-from .spot import Spot
+from .spot_client import SpotClient
 
 LOGGER = logging.getLogger()
 
@@ -73,7 +73,7 @@ def start_recording(args):
         "addr": args.hostname,
         "download_path": "/home/romir/Downloads/spot",
     }
-    spot = Spot(config)
+    spot = SpotClient(config)
     assert not spot.robot.is_estopped(), 'Robot is estopped. ' \
                                          'Please use an external E-Stop client, ' \
                                          'such as the estop SDK example, to configure E-Stop.'
@@ -130,7 +130,7 @@ class AutowalkGUI(QtWidgets.QMainWindow):
     """GUI for recording autowalk"""
     pose_panel_layout: QVBoxLayout
 
-    def __init__(self, robot: Spot):
+    def __init__(self, robot: SpotClient):
         super().__init__()
         self.spot = robot
         self.robot = self.spot.robot

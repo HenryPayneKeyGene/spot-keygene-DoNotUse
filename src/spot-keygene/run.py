@@ -18,7 +18,7 @@ from bosdyn.client.util import setup_logging
 
 from .blk import BLK
 from .recording import RecorderInterface
-from .spot import Spot
+from .spot_client import SpotClient
 from .util import countdown
 
 
@@ -28,7 +28,7 @@ class Run:
         self.logger = logging.getLogger(__name__)
 
         self.logger.info("Starting up")
-        self.robot = Spot(config['spot'])
+        self.robot = SpotClient(config['spot'])
         self.lidar = BLK()
         # self.nav = self.robot.graph_nav_interface
 

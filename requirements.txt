@@ -8,3 +8,5 @@ windows-curses ; sys_platform == 'win32'
 numpy~=1.21.6
 pyqt5~=5.15.9
 protobuf~=3.19.4
+
+opencv-python~=4.8.0.76
