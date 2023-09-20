@@ -80,7 +80,7 @@ def keygene_main(logger=None):
         spot.acquire()
         spot.power_on()
         spot.upload_autowalk(config["path"])
-        if not spot.start_autowalk():
+        if not spot.start_autowalk(do_localize=True):
             logger.error("could not start autowalk")
             raise Exception("could not start autowalk")
 
