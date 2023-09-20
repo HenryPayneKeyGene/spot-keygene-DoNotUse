@@ -27,11 +27,12 @@ def gen_tags(path, tag_map=None, make_zip=False):
         if make_zip:
             output = io.BytesIO()
             img.save(output, format='png')
-            print(len(output.getvalue()))
             zip_file.writestr(f"{cmd}/{i}_{cmd}.png", output.getvalue())
         else:
             img.save(f"{path}/{cmd}/{i}_{cmd}.png")
+        print(f"{i}:{cmd}")
     if make_zip:
+        print(f"Saved tags to {path}/tags.zip.")
         zip_file.close()
 
 
