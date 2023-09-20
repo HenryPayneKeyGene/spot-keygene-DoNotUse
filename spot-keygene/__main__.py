@@ -21,18 +21,20 @@ record_parser = subparsers.add_parser('record', help='Run the recording service.
 add_base_arguments(record_parser)
 record_parser.add_argument('--output', help='Output directory for the recording.', default='.')
 
-qr_parse = subparsers.add_parser('qr', help='Generate QR codes.')
-qr_parse.add_argument('--output', help='Output directory for the QR codes.', default='./tags')
-qr_parse.add_argument('--zip', help='Generate a zip file of the QR codes.', action='store_true')
-qr_parse.add_argument("--set",
-                      metavar="KEY=VALUE",
-                      nargs='+',
-                      help="Set a number of id-command pairs "
-                           "(do not put spaces before or after the = sign). "
-                           "If a value contains spaces, you should define "
-                           "it with double quotes: "
-                           'foo="this is a sentence". Note that '
-                           "values are always treated as strings.")
+qr_parser = subparsers.add_parser('qr', help='Generate QR codes.')
+qr_parser.add_argument('--output', help='Output directory for the QR codes.', default='./tags')
+qr_parser.add_argument('--zip', help='Generate a zip file of the QR codes.', action='store_true')
+qr_parser.add_argument("--set",
+                       metavar="KEY=VALUE",
+                       nargs='+',
+                       help="Set a number of id-command pairs "
+                            "(do not put spaces before or after the = sign). "
+                            "If a value contains spaces, you should define "
+                            "it with double quotes: "
+                            'foo="this is a sentence". Note that '
+                            "values are always treated as strings.")
+
+default_parser = subparsers.add_parser('<blank>', help='Run the default service.')
 
 options = parser.parse_args()
 
@@ -41,28 +43,25 @@ if options.service == 'lidar':
     from .lidar_service import start_lidar
 
     start_lidar(options)
-    sys.exit(0)
 elif options.service == 'record':
     print("Starting recording service...")
     from .recording import start_recording
 
     start_recording(options)
-    sys.exit(0)
 elif options.service == 'qr':
     print("Generating QR codes...")
     from .gen_tags import gen_tags
 
-    d = None
+    d = {}
     if options.set:
-        d = {}
         for item in options.set:
             items = item.split('=')
             key = items[0].strip()  # we remove blanks around keys, as is logical
             if len(items) < 2:
                 raise argparse.ArgumentTypeError('You must provide a value for each key.')
-            if len(items) > 1:
-                # rejoin the rest:
-                value = '='.join(items[1:])
+            value = '='.join(items[1:])
+            if value == "":
+                raise argparse.ArgumentTypeError('You must provide a value for each key.')
             # noinspection PyUnboundLocalVariable
             d[key] = value
 
