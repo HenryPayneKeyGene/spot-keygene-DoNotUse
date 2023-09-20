@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from bosdyn.api import image_pb2, world_object_pb2
 from bosdyn.api.autowalk import walks_pb2
-from bosdyn.api.graph_nav import map_pb2
+from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
 from bosdyn.api.mission import mission_pb2
 from bosdyn.client import ResponseError, RpcError, create_standard_sdk
 from bosdyn.client.async_tasks import AsyncTasks
@@ -299,9 +299,10 @@ class SpotClient:
         for image_response in self.images:
             if not image_response.source.image_type == image_pb2.ImageSource.IMAGE_TYPE_VISUAL:
                 continue
-            img = cv2.imdecode(np.frombuffer(image_response.shot.image.data, dtype=np.uint8), cv2.IMREAD_UNCHANGED).reshape(image_response.shot.image.rows,
-                                                                                        image_response.shot.image.cols,
-                                                                                        -1)
+            img = cv2.imdecode(np.frombuffer(image_response.shot.image.data, dtype=np.uint8),
+                               cv2.IMREAD_UNCHANGED).reshape(image_response.shot.image.rows,
+                                                             image_response.shot.image.cols,
+                                                             -1)
             data, bbox, _ = detector.detectAndDecode(img)
             if bbox is not None:
                 tags.append((data, bbox))
@@ -405,6 +406,19 @@ class SpotClient:
         Starts the autowalk.
         """
         self.logger.info("Starting autowalk...")
+
+        # Localize robot
+        localization_error = False
+        graph = self.graph_nav_client.download_graph(timeout=timeout)
+        self.logger.info('Localizing robot...')
+        robot_state = self.state_client.get_robot_state()
+        localization = nav_pb2.Localization()
+
+        # Attempt to localize using any visible fiducial
+        self.graph_nav_client.set_localization(
+            initial_guess_localization=localization, ko_tform_body=None, max_distance=None,
+            max_yaw=None,
+            fiducial_init=graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NEAREST)
         mission_state: mission_pb2.State = self.mission_client.get_state()
 
         if mission_state.mission_id == -1:  # If no mission is loaded
