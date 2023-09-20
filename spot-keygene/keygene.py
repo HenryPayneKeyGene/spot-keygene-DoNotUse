@@ -56,40 +56,45 @@ def keygene_main(logger=None):
     lidar: BLK_ARC = connect()
     logger: Logger = logger or spot.logger
 
-    spot.acquire()
-    spot.upload_autowalk(config["path"])
-    if not spot.start_autowalk():
-        logger.error("could not start autowalk")
-        return
+    try:
+        spot.acquire()
+        spot.power_on()
+        spot.upload_autowalk(config["path"])
+        if not spot.start_autowalk():
+            logger.error("could not start autowalk")
+            raise Exception("could not start autowalk")
+           
 
-    processed_tags = set()
-    scans = set()
-
-    while True:
-        qrs = spot.get_qr_tags()
-        if not qrs:
-            time.sleep(0.2)
-            continue
-
-        for data, bbox in qrs:
-            try:
-                tag, command = data.split(":")
-            except ValueError:
+        processed_tags = set()
+        scans = set()
+        while True:
+            qrs = spot.get_qr_tags()
+            if not qrs:
+                time.sleep(0.2)
                 continue
 
-            if tag in processed_tags or command not in COMMANDS:
-                continue
+            for data, bbox in qrs:
+                try:
+                    tag, command = data.split(":")
+                except ValueError:
+                    continue
+    
+                if tag in processed_tags or command not in COMMANDS:
+                    continue
+    
+                logger.info(f"Found tag: {tag} with command: {command}")
 
-            logger.info(f"Found tag: {tag} with command: {command}")
+                if not spot.pause_autowalk():
+                    raise Exception("Failed to pause autowalk.")
 
-            if not spot.pause_autowalk():
-                raise Exception("Failed to pause autowalk.")
+                if command == "scan":
+                    scan_id = COMMANDS[command](lidar, spot, logger)
+                    scans.add(scan_id)
+                elif command == "upload":
+                    upload(lidar, spot, logger)
+    
+                if not spot.start_autowalk():
+                    raise Exception("Failed to start autowalk.")
+    except Exception as _:
+        spot.shutdown()
 
-            if command == "scan":
-                scan_id = COMMANDS[command](lidar, spot, logger)
-                scans.add(scan_id)
-            elif command == "upload":
-                upload(lidar, spot, logger)
-
-            if not spot.start_autowalk():
-                raise Exception("Failed to start autowalk.")

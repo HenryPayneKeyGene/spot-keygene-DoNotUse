@@ -90,11 +90,6 @@ class SpotClient:
         self.graph_nav_client: GraphNavClient = self.robot.ensure_client(GraphNavClient.default_service_name)
         self.img_client: ImageClient = self.robot.ensure_client(ImageClient.default_service_name)
 
-        try:
-            self.estop_endpoint = EstopEndpoint(self.estop_client, 'kg-estop', 9.0)
-        except Exception as _:
-            # Not the estop.
-            self.estop_endpoint = None
 
         self.robot_state_task = AsyncRobotState(self.state_client)
         self.image_task = AsyncImage(self.img_client, get_img_source_list(self.img_client))
@@ -102,11 +97,7 @@ class SpotClient:
         update_thread = threading.Thread(target=update_tasks, daemon=True, args=[async_tasks])
         update_thread.start()
 
-        if self.estop_endpoint is not None:
-            self.estop_endpoint.force_simple_setup(
-            )  # Set this endpoint as the robot's sole estop.
 
-        self.estop_endpoint.allow()
 
         self.estop_keep_alive = None
         self.exit_check = None
@@ -158,8 +149,6 @@ class SpotClient:
         self.power_off()
         self.release()
 
-        if self.estop_keep_alive:
-            self.estop_keep_alive.shutdown()
 
         self.logger.info("Stopping time sync...")
         self.robot.time_sync.stop()
@@ -425,7 +414,7 @@ class SpotClient:
 
         if mission_state.mission_id == -1:  # If no mission is loaded
             raise Exception("No mission is loaded. Please upload a mission first.")
-        while mission_state.status in (mission_pb2.State.STATUS_NONE, mission_pb2.State.STATUS_RUNNING):
+        while mission_state.status == mission_pb2.State.STATUS_NONE:
             self.logger.info("Waiting for mission to start...")
             if mission_state.questions:
                 self.logger.info(f"Mission failed with questions: {mission_state.questions}")
@@ -441,8 +430,10 @@ class SpotClient:
 
             mission_state = self.mission_client.get_state()
             self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
+            if mission_state.status in (mission_pb2.State.STATUS_ERROR, mission_pb2.State.STATUS_FAILURE):
+                raise Exception(f"error starting autowalk: {mission_state.error}")
 
-        return mission_state.status in (mission_pb2.State.STATUS_SUCCESS, mission_pb2.State.STATUS_PAUSED)
+        return mission_state.status in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED)
 
     def stop_autowalk(self):
         """
