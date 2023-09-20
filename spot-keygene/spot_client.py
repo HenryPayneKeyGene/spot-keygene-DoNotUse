@@ -299,7 +299,7 @@ class SpotClient:
         for image_response in self.images:
             if not image_response.source.image_type == image_pb2.ImageSource.IMAGE_TYPE_VISUAL:
                 continue
-            img = np.frombuffer(image_response.shot.image.data, dtype=np.uint8).reshape(image_response.shot.image.rows,
+            img = cv2.imdecode(np.frombuffer(image_response.shot.image.data, dtype=np.uint8), cv2.IMREAD_UNCHANGED).reshape(image_response.shot.image.rows,
                                                                                         image_response.shot.image.cols,
                                                                                         -1)
             data, bbox, _ = detector.detectAndDecode(img)

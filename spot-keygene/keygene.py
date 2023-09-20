@@ -58,7 +58,9 @@ def keygene_main(logger=None):
 
     spot.acquire()
     spot.upload_autowalk(config["path"])
-    spot.start_autowalk()
+    if not spot.start_autowalk():
+        logger.error("could not start autowalk")
+        return
 
     processed_tags = set()
     scans = set()
