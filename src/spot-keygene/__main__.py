@@ -37,6 +37,6 @@ elif options.service == 'record':
     sys.exit(0)
 else:
     print("Starting...")
-    from .main import default_main
+    from .keygene import keygene_main
 
-    default_main()
+    keygene_main()

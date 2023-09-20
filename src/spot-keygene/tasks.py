@@ -4,13 +4,12 @@
 #  https://opensource.org/licenses/MIT
 import logging
 import time
-from typing import Final
 
-from bosdyn.client.async_tasks import AsyncPeriodicQuery
+from bosdyn.client.async_tasks import AsyncPeriodicQuery, AsyncTasks
 from bosdyn.client.robot_state import RobotStateClient
 
 
-UPDATE_INTERVAL: Final[float] = 0.1  # s
+UPDATE_INTERVAL = 0.1  # s
 
 
 def update_tasks(async_tasks: AsyncTasks):
