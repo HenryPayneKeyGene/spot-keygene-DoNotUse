@@ -288,7 +288,11 @@ class SpotClient:
                                cv2.IMREAD_UNCHANGED).reshape(image_response.shot.image.rows,
                                                              image_response.shot.image.cols,
                                                              -1)
-            data, bbox, _ = detector.detectAndDecode(img)
+            try:
+                data, bbox, _ = detector.detectAndDecode(img)
+            except Exception as err:
+                self.logger.error(f"Could not decode QR code: {err}")
+                continue
             if bbox is not None:
                 tags.append((data, bbox))
         return tags
