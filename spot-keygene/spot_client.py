@@ -144,7 +144,7 @@ class SpotClient:
         return True
 
     def release(self):
-        if not self.lease_keep_alive.is_alive():
+        if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
             return
         self.lease_keep_alive.shutdown()
         self.logger.warn("Lease released.")
@@ -152,9 +152,9 @@ class SpotClient:
     def shutdown(self):
         self.logger.warn("Shutting down...")
 
-        if self.acquire():
+        if self.lease_keep_alive is not None and self.lease_keep_alive.is_alive():
             self.power_off()
-        self.release()
+            self.release()
 
         self.logger.info("Stopping time sync...")
         self.robot.time_sync.stop()
