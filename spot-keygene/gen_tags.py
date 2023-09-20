@@ -1,7 +1,9 @@
+import io
 import os
 import zipfile
 
 import qrcode
+from qrcode.image.pil import PilImage
 
 COMMANDS = ["scan", "upload"]
 
@@ -21,9 +23,12 @@ def gen_tags(path, tag_map=None, make_zip=False):
             raise ValueError(f"Invalid command {cmd}.")
         qr = qrcode.QRCode()
         qr.add_data(f"{i}:{cmd}")
-        img = qr.make_image()
+        img: PilImage = qr.make_image()
         if make_zip:
-            zip_file.writestr(f"{cmd}/{i}_{cmd}.png", img.tobytes())
+            output = io.BytesIO()
+            img.save(output, format='png')
+            print(len(output.getvalue()))
+            zip_file.writestr(f"{cmd}/{i}_{cmd}.png", output.getvalue())
         else:
             img.save(f"{path}/{cmd}/{i}_{cmd}.png")
     if make_zip:
