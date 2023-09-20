@@ -66,6 +66,7 @@ class SpotClient:
         self.state: str = "startup"
 
         setup_logging()
+        print(f"Connecting to {self.name} at {self.addr}...")
         self.sdk = create_standard_sdk("keygene-client", [MissionClient])
         self.robot = self.sdk.create_robot(self.addr, self.name)
         self.logger = self.robot.logger
