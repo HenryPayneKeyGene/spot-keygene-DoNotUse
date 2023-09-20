@@ -420,10 +420,9 @@ class SpotClient:
             max_yaw=None,
             fiducial_init=graph_nav_pb2.SetLocalizationRequest.FIDUCIAL_INIT_NEAREST)
         mission_state: mission_pb2.State = self.mission_client.get_state()
-
+        self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
         if mission_state.mission_id == -1:  # If no mission is loaded
             raise Exception("No mission is loaded. Please upload a mission first.")
-
         while mission_state in (mission_pb2.State.STATUS_NONE, mission_pb2.State.STATUS_RUNNING):
             if mission_state.questions:
                 self.logger.info(f"Mission failed with questions: {mission_state.questions}")
@@ -438,8 +437,7 @@ class SpotClient:
             time.sleep(1)
 
             mission_state = self.mission_client.get_state()
-
-        self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
+            self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
 
         return mission_state.status in (mission_pb2.State.STATUS_SUCCESS, mission_pb2.State.STATUS_PAUSED)
 
