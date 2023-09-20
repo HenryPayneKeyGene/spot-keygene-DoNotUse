@@ -25,6 +25,7 @@ def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
     while not lidar.is_scanning() and attempts < 20:
         time.sleep(0.5)
         attempts += 1
+    logger.info("scanning...")
     time.sleep(end_time - time.time())
     if not lidar.is_scanning():
         logger.error("Failed to start lidar scan.")
