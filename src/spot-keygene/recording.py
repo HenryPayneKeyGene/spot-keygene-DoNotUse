@@ -31,7 +31,7 @@ from bosdyn.api.graph_nav import graph_nav_pb2, recording_pb2
 from bosdyn.api.mission import nodes_pb2
 from bosdyn.client import ResponseError, RpcError
 from bosdyn.client.async_tasks import AsyncPeriodicQuery, AsyncTasks
-from bosdyn.client.docking import docking_pb2
+from bosdyn.client.docking import DockingClient, docking_pb2
 from bosdyn.client.lease import Error as LeaseBaseError, LeaseKeepAlive
 from bosdyn.client.recording import GraphNavRecordingServiceClient
 from bosdyn.client.robot_command import RobotCommandBuilder
@@ -148,9 +148,9 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         self._graph_nav_client = self.spot.graph_nav_client
         # Clear graph to ensure only the data recorded using this example gets packaged into map
         self._graph_nav_client.clear_graph()
-        self._recording_client = self.spot.recording_client
+        self._recording_client = self.robot.ensure_client(GraphNavRecordingServiceClient.default_service_name)
         self._world_object_client = self.spot.world_object_client
-        self._docking_client = self.spot.docking_client
+        self._docking_client = self.robot.ensure_client(DockingClient.default_service_name)
 
         # Initialize async tasks
         self._robot_state_task = AsyncRobotState(self._robot_state_client)
@@ -180,15 +180,15 @@ class AutowalkGUI(QtWidgets.QMainWindow):
 
         self.command_to_function = {
             27: self._quit_program,
-            ord('P'): self.spot.toggle_power(),
-            ord('v'): self.spot.sit(),
-            ord('f'): self.spot.stand(),
-            ord('w'): self.spot.move_forward(),
-            ord('s'): self.spot.move_backward(),
-            ord('a'): self.spot.strafe_left(),
-            ord('d'): self.spot.strafe_right(),
-            ord('q'): self.spot.turn_left(),
-            ord('e'): self.spot.turn_right(),
+            ord('P'): self.spot.toggle_power,
+            ord('v'): self.spot.sit,
+            ord('f'): self.spot.stand,
+            ord('w'): self.spot.move_forward,
+            ord('s'): self.spot.move_backward,
+            ord('a'): self.spot.strafe_left,
+            ord('d'): self.spot.strafe_right,
+            ord('q'): self.spot.turn_left,
+            ord('e'): self.spot.turn_right,
             ord('L'): self._toggle_lease,
         }
 
