@@ -49,7 +49,7 @@ def keygene_main(logger=None):
 
     config = {
         "name": "spot-keygene",
-        "addr": "192.18.80.3",
+        "addr": "192.168.80.3",
         "path": "./autowalks/scan.walk",
     }
     spot: SpotClient = SpotClient(config)
