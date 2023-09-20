@@ -50,7 +50,7 @@ def keygene_main(logger=None):
     config = {
         "name": "spot-keygene",
         "addr": "192.18.80.3",
-        "path": "./autowalk/",
+        "path": "./autowalks/scan.walk",
     }
     spot: SpotClient = SpotClient(config)
     lidar: BLK_ARC = connect()

@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable, Dict, Tuple, List
+from typing import Callable, Dict, List, Tuple
 
 import bosdyn
 import bosdyn.api.robot_state_pb2 as robot_state_proto
@@ -15,7 +15,7 @@ import bosdyn.api.spot.robot_command_pb2 as spot_command_pb2
 import bosdyn.client
 import cv2
 import numpy as np
-from bosdyn.api import world_object_pb2, image_pb2
+from bosdyn.api import image_pb2, world_object_pb2
 from bosdyn.api.autowalk import walks_pb2
 from bosdyn.api.graph_nav import map_pb2
 from bosdyn.api.mission import mission_pb2
@@ -30,13 +30,13 @@ from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.power import PowerClient
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.client.util import setup_logging, authenticate
+from bosdyn.client.util import authenticate, setup_logging
 from bosdyn.client.world_object import WorldObjectClient
 from bosdyn.mission.client import MissionClient
 
 from .exceptions import NoMissionRunningException
 from .globals import VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
-from .tasks import AsyncRobotState, AsyncImage, update_tasks
+from .tasks import AsyncImage, AsyncRobotState, update_tasks
 from .util import get_img_source_list
 
 
@@ -394,7 +394,7 @@ class SpotClient:
         Uploads the autowalk to the robot.
         """
         self._upload_graph_and_snapshots(path, disable_alternate_route_finding, timeout)
-        self._upload_autowalk(os.path.join(path, 'autowalk'), timeout)
+        self._upload_autowalk(os.path.join(path, 'missions/autogenerate.walk'), timeout)
 
     def start_autowalk(self, timeout=60, disable_directed_exploration=False,
                        path_following_mode=map_pb2.Edge.Annotations.PATH_MODE_UNKNOWN):
