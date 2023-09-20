@@ -115,5 +115,8 @@ def keygene_main(logger=None):
                     raise Exception("Failed to start autowalk.")
     except Exception as e:
         logger.error(e)
+    finally:
         spot.shutdown()
+        lidar.disconnect()
+
     logger.info("exiting")
