@@ -296,10 +296,12 @@ class SpotClient:
 
         detector = cv2.QRCodeDetector()
         tags: List[Tuple[str, np.ndarray]] = []
-        for image in self.images:
-            if not image.source.image_type == image_pb2.ImageSource.IMAGE_TYPE_VISUAL:
+        for image_response in self.images:
+            if not image_response.source.image_type == image_pb2.ImageSource.IMAGE_TYPE_VISUAL:
                 continue
-            img = np.frombuffer(image.image.data, dtype=np.uint8).reshape(image.image.rows, image.image.cols, -1)
+            img = np.frombuffer(image_response.shot.image.data, dtype=np.uint8).reshape(image_response.shot.image.rows,
+                                                                                        image_response.shot.image.cols,
+                                                                                        -1)
             data, bbox, _ = detector.detectAndDecode(img)
             if bbox is not None:
                 tags.append((data, bbox))
