@@ -410,7 +410,7 @@ class SpotClient:
 
         if mission_state.mission_id == -1:  # If no mission is loaded
             raise Exception("No mission is loaded. Please upload a mission first.")
-        while mission_state.status == mission_pb2.State.STATUS_NONE:
+        while mission_state.status in (mission_pb2.State.STATUS_NONE, mission_pb2.State.STATUS_PAUSED):
             self.logger.info("Waiting for mission to start...")
             if mission_state.questions:
                 self.logger.info(f"Mission failed with questions: {mission_state.questions}")

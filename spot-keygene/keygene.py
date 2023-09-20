@@ -21,18 +21,20 @@ def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
 
     spot.scan_pose(duration)
     scan_response = lidar.start_capture()
+    scan_id = scan_response.scan_id
     attempts = 0
     while not lidar.is_scanning() and attempts < 20:
         time.sleep(0.5)
         attempts += 1
-    logger.info(f"scanning... ({scan_response.scan_id})")
+    logger.info(f"scanning... ({scan_id})")
     time.sleep(end_time - time.time())
     if not lidar.is_scanning():
         logger.error("Failed to start lidar scan.")
         return
     lidar.stop_capture()
     spot.stand()
-    return scan_response.scan_id
+    logger.info(f"Finished lidar scan. ({scan_id})")
+    return scan_id
 
 
 def upload(lidar, spot, logger):
