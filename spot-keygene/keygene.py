@@ -70,8 +70,8 @@ def keygene_main(logger=None):
         while not spot.acquire():
             logger.info("Lease not available. Waiting...")
             time.sleep(1)
-        spot.logger.info("Waiting for ESTOP to be engaged...")
-        while not spot.robot.is_estopped():
+        spot.logger.info("Waiting for ESTOP to be disengaged...")
+        while spot.robot.is_estopped():
             time.sleep(1)
 
         spot.acquire()
