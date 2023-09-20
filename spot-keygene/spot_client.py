@@ -137,11 +137,13 @@ class SpotClient:
 
         try:
             self.lease_keep_alive = LeaseKeepAlive(self.lease_client)
-        except RpcError as err:
+        except Exception as err:
             self.logger.error(f"Failed to acquire lease: {err}")
             return False
-        self.logger.info(f"Lease acquired.")
-        return True
+        if self.lease_keep_alive.is_alive():
+            self.logger.info(f"Lease acquired.")
+            return True
+        return False
 
     def release(self):
         if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
@@ -152,7 +154,8 @@ class SpotClient:
     def shutdown(self):
         self.logger.warn("Shutting down...")
 
-        self.power_off()
+        if self.acquire(): 
+            self.power_off()
         self.release()
 
         self.logger.info("Stopping time sync...")
