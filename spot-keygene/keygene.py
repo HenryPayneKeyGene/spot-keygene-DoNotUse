@@ -10,6 +10,7 @@ from bosdyn.api.mission import mission_pb2
 from blk_arc_api.blk_arc import BLK_ARC
 from .blk import connect
 from .spot_client import SpotClient
+from .util import countdown
 
 
 def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
@@ -78,6 +79,7 @@ def keygene_main(logger=None):
             time.sleep(1)
 
         spot.acquire()
+        countdown(5)
         spot.power_on()
         spot.upload_autowalk(config["path"])
         if not spot.start_autowalk(do_localize=True):
@@ -103,7 +105,7 @@ def keygene_main(logger=None):
                 if tag in processed_tags or command not in COMMANDS:
                     continue
 
-                logger.info(f"Found tag: {tag} with command: {command}")
+                logger.info(f"tag: {tag} -- {command}")
 
                 if not spot.pause_autowalk():
                     raise Exception("Failed to pause autowalk.")
