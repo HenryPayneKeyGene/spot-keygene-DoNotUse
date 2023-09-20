@@ -136,17 +136,15 @@ class SpotClient:
             self.logger.warn("EStop not configured -- please use an external EStop client.")
 
         try:
-            self.lease_keep_alive = LeaseKeepAlive(self.lease_client)
+            self.lease_keep_alive = LeaseKeepAlive(self.lease_client, must_acquire=True, return_at_exit=True)
         except Exception as err:
             self.logger.error(f"Failed to acquire lease: {err}")
             return False
-        if self.lease_keep_alive.is_alive():
-            self.logger.info(f"Lease acquired.")
-            return True
-        return False
+        self.logger.info(f"Lease acquired.")
+        return True
 
     def release(self):
-        if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
+        if not self.lease_keep_alive.is_alive():
             return
         self.lease_keep_alive.shutdown()
         self.logger.warn("Lease released.")
@@ -154,7 +152,7 @@ class SpotClient:
     def shutdown(self):
         self.logger.warn("Shutting down...")
 
-        if self.acquire(): 
+        if self.acquire():
             self.power_off()
         self.release()
 
