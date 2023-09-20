@@ -56,8 +56,8 @@ def keygene_main(logger=None):
     lidar: BLK_ARC = connect()
     logger: Logger = logger or spot.logger
 
-    spot.upload_autowalk(config["path"])
     spot.acquire()
+    spot.upload_autowalk(config["path"])
     spot.start_autowalk()
 
     processed_tags = set()
