@@ -5,6 +5,8 @@
 import time
 from logging import Logger
 
+from bosdyn.api.mission import mission_pb2
+
 from blk_arc_api.blk_arc import BLK_ARC
 from .blk import connect
 from .spot_client import SpotClient
@@ -57,17 +59,33 @@ def keygene_main(logger=None):
     logger: Logger = logger or spot.logger
 
     try:
+        spot.release()
+
+        logger.info("Waiting for fiducials to be visible... Move the robot to a location where fiducials are visible.")
+        while not spot.get_visible_fiducials():
+            time.sleep(0.2)
+
+        # wait for lease to become available
+        spot.logger.info("Waiting for lease to become available...")
+        while not spot.acquire():
+            logger.info("Lease not available. Waiting...")
+            time.sleep(1)
+        spot.logger.info("Waiting for ESTOP to be engaged...")
+        while not spot.robot.is_estopped():
+            time.sleep(1)
+
         spot.acquire()
         spot.power_on()
         spot.upload_autowalk(config["path"])
         if not spot.start_autowalk():
             logger.error("could not start autowalk")
             raise Exception("could not start autowalk")
-           
 
         processed_tags = set()
         scans = set()
         while True:
+            if spot.mission_status not in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED):
+                break
             qrs = spot.get_qr_tags()
             if not qrs:
                 time.sleep(0.2)
@@ -78,10 +96,10 @@ def keygene_main(logger=None):
                     tag, command = data.split(":")
                 except ValueError:
                     continue
-    
+
                 if tag in processed_tags or command not in COMMANDS:
                     continue
-    
+
                 logger.info(f"Found tag: {tag} with command: {command}")
 
                 if not spot.pause_autowalk():
@@ -92,9 +110,10 @@ def keygene_main(logger=None):
                     scans.add(scan_id)
                 elif command == "upload":
                     upload(lidar, spot, logger)
-    
+
                 if not spot.start_autowalk():
                     raise Exception("Failed to start autowalk.")
-    except Exception as _:
+    except Exception as e:
+        logger.error(e)
         spot.shutdown()
-
+    logger.info("exiting")

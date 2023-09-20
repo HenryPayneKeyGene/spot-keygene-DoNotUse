@@ -22,7 +22,7 @@ from bosdyn.api.mission import mission_pb2
 from bosdyn.client import ResponseError, RpcError, create_standard_sdk
 from bosdyn.client.async_tasks import AsyncTasks
 from bosdyn.client.autowalk import AutowalkClient
-from bosdyn.client.estop import EstopClient, EstopEndpoint, EstopKeepAlive
+from bosdyn.client.estop import EstopClient
 from bosdyn.client.frame_helpers import ODOM_FRAME_NAME
 from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.image import ImageClient
@@ -90,14 +90,11 @@ class SpotClient:
         self.graph_nav_client: GraphNavClient = self.robot.ensure_client(GraphNavClient.default_service_name)
         self.img_client: ImageClient = self.robot.ensure_client(ImageClient.default_service_name)
 
-
         self.robot_state_task = AsyncRobotState(self.state_client)
         self.image_task = AsyncImage(self.img_client, get_img_source_list(self.img_client))
         async_tasks = AsyncTasks([self.robot_state_task, self.image_task] + async_tasks)
         update_thread = threading.Thread(target=update_tasks, daemon=True, args=[async_tasks])
         update_thread.start()
-
-
 
         self.estop_keep_alive = None
         self.exit_check = None
@@ -121,6 +118,10 @@ class SpotClient:
         """Get latest images."""
         return self.image_task.proto
 
+    @property
+    def mission_status(self):
+        return self.mission_client.get_state().status
+
     # basics
     def acquire(self):
         self.logger.debug("Waiting for time sync...")
@@ -129,13 +130,18 @@ class SpotClient:
 
         if self.lease_keep_alive is not None and self.lease_keep_alive.is_alive():
             self.logger.warn("Lease already acquired.")
-            return
+            return True
 
         if not hasattr(self, "_estop"):
             self.logger.warn("EStop not configured -- please use an external EStop client.")
 
-        self.lease_keep_alive = LeaseKeepAlive(self.lease_client)
+        try:
+            self.lease_keep_alive = LeaseKeepAlive(self.lease_client)
+        except RpcError as err:
+            self.logger.error(f"Failed to acquire lease: {err}")
+            return False
         self.logger.info(f"Lease acquired.")
+        return True
 
     def release(self):
         if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
@@ -148,7 +154,6 @@ class SpotClient:
 
         self.power_off()
         self.release()
-
 
         self.logger.info("Stopping time sync...")
         self.robot.time_sync.stop()
@@ -174,16 +179,6 @@ class SpotClient:
         assert not self.robot.is_powered_on(), "Failed to power off"
         self.powered_on = False
         self.logger.info("Power off complete")
-
-    def toggle_estop(self):
-        """toggle estop on/off. Initial state is ON"""
-        if self.estop_client is not None and self.estop_endpoint is not None:
-            if not self.estop_keep_alive:
-                self.estop_keep_alive = EstopKeepAlive(self.estop_endpoint)
-            else:
-                self._try_grpc('stopping estop', self.estop_keep_alive.stop)
-                self.estop_keep_alive.shutdown()
-                self.estop_keep_alive = None
 
     def toggle_time_sync(self):
         if self.robot.time_sync.stopped:
