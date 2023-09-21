@@ -84,7 +84,7 @@ def main(mission_fiducials: set = None, logger: Logger = None):
             logger.info("Undocking...")
             if not spot.undock():
                 raise Exception("could not undock")
-        spot.stand()
+
         spot.upload_autowalk(config["path"])
         if not spot.start_autowalk(do_localize=True):
             raise Exception("could not start autowalk")
