@@ -12,7 +12,7 @@ from blk_arc_api.blk_arc import BLK_ARC
 from .globals import ACTIONS, DOCK_ID
 from .lidar.blk import connect
 from .spot_client import SpotClient
-from .util import Universe, countdown
+from .util import countdown
 
 
 def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
@@ -61,11 +61,11 @@ def main(mission_fiducials: set = None, logger: Logger = None):
     try:
         spot.release()
 
-        if mission_fiducials is None:
-            mission_fiducials = Universe()
+        # mission_fiducials = Universe()
         logger.info("Waiting for fiducials to be visible... Move the robot to a location where fiducials are visible.")
-        while not spot.get_visible_fiducials() & mission_fiducials:
-            time.sleep(0.2)
+        if mission_fiducials is None:
+            while not spot.get_visible_fiducials():
+                time.sleep(0.2)
 
         # wait for lease to become available
         spot.logger.info("Waiting for lease to become available...")
