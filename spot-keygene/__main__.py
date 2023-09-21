@@ -8,6 +8,9 @@ import sys
 
 from bosdyn.client.util import add_base_arguments, add_service_endpoint_arguments
 
+from . import keygene, lidar, qr, recording
+from .globals import ACTIONS
+
 parser = argparse.ArgumentParser(description='Spot Keygene')
 parser.add_argument('--version', action='version', version='%(prog)s 0.1.0')
 
@@ -40,20 +43,18 @@ options = parser.parse_args()
 
 if options.service == 'lidar':
     print("Starting LiDAR service...")
-    from .lidar_service import start_lidar
 
-    start_lidar(options)
+    lidar.start_lidar(options)
 elif options.service == 'record':
     print("Starting recording service...")
-    from .recording import start_recording
 
-    start_recording(options)
+    recording.start_recording(options)
 elif options.service == 'qr':
     print("Generating QR codes...")
-    from .gen_tags import gen_tags
 
-    d = {}
+
     if options.set:
+        tags = {}
         for item in options.set:
             items = item.split('=')
             key = items[0].strip()  # we remove blanks around keys, as is logical
@@ -63,12 +64,13 @@ elif options.service == 'qr':
             if value == "":
                 raise argparse.ArgumentTypeError('You must provide a value for each key.')
             # noinspection PyUnboundLocalVariable
-            d[key] = value
+            tags[key] = value
+    else:
+        tags = {i: ACTIONS[i % len(ACTIONS)] for i in range(3 * len(ACTIONS))}
 
-    gen_tags(options.output, d, options.zip)
+    qr.gen_tags(options.output, tags, options.zip)
     sys.exit(0)
 else:
     print("Starting...")
-    from .keygene import keygene_main
 
-    keygene_main()
+    keygene.main()

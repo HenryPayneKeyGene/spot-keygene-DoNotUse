@@ -11,6 +11,6 @@ a BLK-ARC LIDAR.
 import importlib_metadata
 
 try:
-    __version__ = importlib_metadata.version("spot-keygene")
+    __version__ = importlib_metadata.version("keygene")
 except:
     __version__ = "unknown (check package metadata)"

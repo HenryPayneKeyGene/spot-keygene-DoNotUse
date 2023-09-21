@@ -18,6 +18,13 @@ VISUAL_SOURCE_TO_DEPTH_MAP_SOURCE = {
 }
 
 
+class Universe(set):
+    """overriding the set class to add a contains method that always returns true"""
+
+    def __contains__(self, _):
+        return True
+
+
 def get_img_source_list(image_client):
     """Gets a list of image sources and filters based on config dictionary
 

@@ -2,6 +2,7 @@
 #  You may use, distribute and modify this code under the terms of the MIT License.
 #  You should have received a copy of the MIT License with this file. If not, please visit:
 #  https://opensource.org/licenses/MIT
+
 from __future__ import annotations
 
 import os
@@ -17,18 +18,20 @@ import cv2
 import numpy as np
 from bosdyn.api import image_pb2, world_object_pb2
 from bosdyn.api.autowalk import walks_pb2
+from bosdyn.api.docking import docking_pb2
 from bosdyn.api.graph_nav import graph_nav_pb2, map_pb2, nav_pb2
 from bosdyn.api.mission import mission_pb2
 from bosdyn.client import ResponseError, RpcError, create_standard_sdk
 from bosdyn.client.async_tasks import AsyncTasks
 from bosdyn.client.autowalk import AutowalkClient
+from bosdyn.client.docking import DockingClient, blocking_dock_robot, blocking_undock, get_dock_id
 from bosdyn.client.estop import EstopClient
 from bosdyn.client.frame_helpers import ODOM_FRAME_NAME
 from bosdyn.client.graph_nav import GraphNavClient
 from bosdyn.client.image import ImageClient
 from bosdyn.client.lease import LeaseClient, LeaseKeepAlive
 from bosdyn.client.power import PowerClient
-from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
+from bosdyn.client.robot_command import CommandFailedError, RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.util import authenticate, setup_logging
 from bosdyn.client.world_object import WorldObjectClient
@@ -89,6 +92,7 @@ class SpotClient:
         self.autowalk_client: AutowalkClient = self.robot.ensure_client(AutowalkClient.default_service_name)
         self.graph_nav_client: GraphNavClient = self.robot.ensure_client(GraphNavClient.default_service_name)
         self.img_client: ImageClient = self.robot.ensure_client(ImageClient.default_service_name)
+        self.docking_client: DockingClient = self.robot.ensure_client(DockingClient.default_service_name)
 
         self.robot_state_task = AsyncRobotState(self.state_client)
         self.image_task = AsyncImage(self.img_client, get_img_source_list(self.img_client))
@@ -121,6 +125,10 @@ class SpotClient:
     @property
     def mission_status(self):
         return self.mission_client.get_state().status
+
+    @property
+    def is_docked(self) -> bool:
+        return self.docking_client.get_docking_state().status == docking_pb2.DockState.STATUS_DOCKED
 
     # basics
     def acquire(self):
@@ -180,6 +188,29 @@ class SpotClient:
         assert not self.robot.is_powered_on(), "Failed to power off"
         self.powered_on = False
         self.logger.info("Power off complete")
+
+    def dock(self, dock_id: int = None):
+        self.stand()
+        try:
+            blocking_dock_robot(self.robot, dock_id)
+        except CommandFailedError as err:
+            self.logger.error(f"Failed to dock: {err}")
+            return False
+        self.logger.info(f"Docked at {dock_id}")
+        return True
+
+    def undock(self):
+        dock_id = get_dock_id(self.robot)
+        if dock_id is None:
+            self.logger.error("No dock found.")
+            return False
+        try:
+            blocking_undock(self.robot)
+        except CommandFailedError as err:
+            self.logger.error(f"Failed to undock: {err}")
+            return False
+        self.logger.info(f"Undocked from {dock_id}")
+        return True
 
     def toggle_time_sync(self):
         if self.robot.time_sync.stopped:
@@ -274,7 +305,7 @@ class SpotClient:
     def get_visible_fiducials(self):
         """Return fiducials visible to robot."""
         request_fiducials = [world_object_pb2.WORLD_OBJECT_APRILTAG]
-        return self.world_object_client.list_world_objects(object_type=request_fiducials).world_objects
+        return set(self.world_object_client.list_world_objects(object_type=request_fiducials).world_objects)
 
     def get_qr_tags(self):
         """Return QR tags visible to robot."""
@@ -296,6 +327,13 @@ class SpotClient:
             if bbox is not None:
                 tags.append((data, bbox))
         return tags
+
+    def save_images(self, path):
+        """Save images to disk."""
+        os.makedirs(path, exist_ok=True)
+        for i, image_response in enumerate(self.images):
+            with open(f"{path}/image_{i}.jpg", "wb") as f:
+                f.write(image_response.shot.image.data)
 
     # pose
 

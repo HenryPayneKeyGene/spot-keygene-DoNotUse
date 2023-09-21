@@ -2,15 +2,17 @@
 #  You may use, distribute and modify this code under the terms of the MIT License.
 #  You should have received a copy of the MIT License with this file. If not, please visit:
 #  https://opensource.org/licenses/MIT
+
 import time
 from logging import Logger
 
 from bosdyn.api.mission import mission_pb2
 
 from blk_arc_api.blk_arc import BLK_ARC
-from .blk import connect
+from .globals import ACTIONS, DOCK_ID
+from .lidar.blk import connect
 from .spot_client import SpotClient
-from .util import countdown
+from .util import Universe, countdown
 
 
 def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
@@ -39,16 +41,10 @@ def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
 
 
 def upload(lidar, spot, logger):
-    pass
+    raise NotImplementedError
 
 
-COMMANDS = {
-    "scan": scan,
-    "upload": upload,
-}
-
-
-def keygene_main(logger=None):
+def main(mission_fiducials: set = None, logger: Logger = None):
     """
     Main function for keygene.
     """
@@ -65,8 +61,10 @@ def keygene_main(logger=None):
     try:
         spot.release()
 
+        if mission_fiducials is None:
+            mission_fiducials = Universe()
         logger.info("Waiting for fiducials to be visible... Move the robot to a location where fiducials are visible.")
-        while not spot.get_visible_fiducials():
+        while not spot.get_visible_fiducials() & mission_fiducials:
             time.sleep(0.2)
 
         # wait for lease to become available
@@ -81,9 +79,12 @@ def keygene_main(logger=None):
         spot.acquire()
         countdown(5)
         spot.power_on()
+
+        if spot.is_docked and not spot.undock():
+            raise Exception("could not undock")
+
         spot.upload_autowalk(config["path"])
         if not spot.start_autowalk(do_localize=True):
-            logger.error("could not start autowalk")
             raise Exception("could not start autowalk")
 
         processed_tags = set()
@@ -93,7 +94,7 @@ def keygene_main(logger=None):
                 break
             qrs = spot.get_qr_tags()
             if not qrs:
-                time.sleep(0.2)
+                time.sleep(0.1)
                 continue
 
             for data, bbox in qrs:
@@ -102,7 +103,7 @@ def keygene_main(logger=None):
                 except ValueError:
                     continue
 
-                if tag in processed_tags or command not in COMMANDS:
+                if tag in processed_tags or command not in ACTIONS:
                     continue
 
                 logger.info(f"tag: {tag} -- {command}")
@@ -111,13 +112,18 @@ def keygene_main(logger=None):
                     raise Exception("Failed to pause autowalk.")
 
                 if command == "scan":
-                    scan_id = COMMANDS[command](lidar, spot, logger)
+                    scan_id = scan(lidar, spot, logger)
                     scans.add(scan_id)
                 elif command == "upload":
                     upload(lidar, spot, logger)
+                elif command == "image":
+                    spot.save_images("./images")
 
                 if not spot.start_autowalk():
                     raise Exception("Failed to start autowalk.")
+
+        if not spot.dock(DOCK_ID):
+            raise Exception("could not dock")
     except Exception as e:
         logger.error(e)
     finally:

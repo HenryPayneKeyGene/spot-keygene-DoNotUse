@@ -1,5 +1,5 @@
 [project]
-name = "spot-keygene"
+name = ""
 version = "0.2.0"
 description = "Code for the KeyGene project at YES!Delft"
 authors = [
@@ -15,11 +15,13 @@ classifiers = [
     "Development Status :: 3 - Alpha",
 ]
 dependencies = [
+    "Pillow",
     "bosdyn-client >= 3.1",
     "bosdyn-mission >= 3.1",
     "grpcio == 1.43.0",
     "opencv-python",
     "protobuf ~= 3.19.4",
+    "qrcode",
     "tqdm",
     "windows-curses ; sys_platform == 'win32'",
 ]

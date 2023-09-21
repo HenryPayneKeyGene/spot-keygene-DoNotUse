@@ -1,5 +1,7 @@
 from bosdyn.api import geometry_pb2
 
+DOCK_ID = 520
+
 VELOCITY_BASE_SPEED = 0.5  # m/s
 VELOCITY_BASE_ANGULAR = 0.8  # rad/sec
 VELOCITY_CMD_DURATION = 0.6  # seconds
@@ -15,3 +17,5 @@ NAV_VELOCITY_LIMITS = geometry_pb2.SE2VelocityLimit(
         angular=NAV_VELOCITY_MAX_YAW), min_vel=geometry_pb2.SE2Velocity(
         linear=geometry_pb2.Vec2(x=-NAV_VELOCITY_MAX_X, y=-NAV_VELOCITY_MAX_Y),
         angular=-NAV_VELOCITY_MAX_YAW))
+
+ACTIONS = ["scan", "upload", "image"]
