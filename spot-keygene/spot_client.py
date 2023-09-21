@@ -38,7 +38,7 @@ from bosdyn.client.world_object import WorldObjectClient
 from bosdyn.mission.client import MissionClient
 
 from .exceptions import NoMissionRunningException
-from .globals import VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
+from .globals import NAV_VELOCITY_LIMITS, VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
 from .tasks import AsyncImage, AsyncRobotState, update_tasks
 from .util import get_img_source_list
 
@@ -466,7 +466,8 @@ class SpotClient:
             local_pause_time = time.time() + timeout
 
             play_settings = mission_pb2.PlaySettings(disable_directed_exploration=disable_directed_exploration,
-                                                     path_following_mode=path_following_mode)
+                                                     path_following_mode=path_following_mode,
+                                                     velocity_limit=NAV_VELOCITY_LIMITS)
             lease = self.lease_client.lease_wallet.advance()
             self.mission_client.play_mission(local_pause_time, [lease], play_settings)
             time.sleep(1)
