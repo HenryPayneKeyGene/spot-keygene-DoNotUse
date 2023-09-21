@@ -80,8 +80,10 @@ def main(mission_fiducials: set = None, logger: Logger = None):
         countdown(5)
         spot.power_on()
 
-        if spot.is_docked and not spot.undock():
-            raise Exception("could not undock")
+        if spot.is_docked:
+            logger.info("Undocking...")
+            if not spot.undock():
+                raise Exception("could not undock")
 
         spot.upload_autowalk(config["path"])
         if not spot.start_autowalk(do_localize=True):
