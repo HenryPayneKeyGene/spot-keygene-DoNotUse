@@ -305,7 +305,8 @@ class SpotClient:
     def get_visible_fiducials(self):
         """Return fiducials visible to robot."""
         request_fiducials = [world_object_pb2.WORLD_OBJECT_APRILTAG]
-        return set(self.world_object_client.list_world_objects(object_type=request_fiducials).world_objects)
+        return {obj.apriltag_properties.tag_id for obj in
+                self.world_object_client.list_world_objects(object_type=request_fiducials).world_objects}
 
     def get_qr_tags(self):
         """Return QR tags visible to robot."""
