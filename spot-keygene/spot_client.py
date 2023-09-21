@@ -128,7 +128,10 @@ class SpotClient:
 
     @property
     def is_docked(self) -> bool:
-        return self.docking_client.get_docking_state().status == docking_pb2.DockState.STATUS_DOCKED
+        try:
+            return self.docking_client.get_docking_state().status == docking_pb2.DockState.STATUS_DOCKED
+        except:
+            return False
 
     # basics
     def acquire(self):
