@@ -38,8 +38,8 @@ from bosdyn.client.robot_command import RobotCommandBuilder
 from bosdyn.util import now_sec, seconds_to_timestamp
 from google.protobuf.duration_pb2 import Duration
 
-from .lidar_service import DIRECTORY_NAME
-from .spot_client import SpotClient
+from ..lidar.lidar_service import DIRECTORY_NAME
+from ..spot_client import SpotClient
 
 LOGGER = logging.getLogger()
 
