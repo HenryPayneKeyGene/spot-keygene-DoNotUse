@@ -108,6 +108,8 @@ def main(mission_fiducials: set = None, logger: Logger = None):
                 if tag in processed_tags or command not in ACTIONS:
                     continue
 
+                processed_tags.add(tag)
+
                 logger.info(f"tag: {tag} -- {command}")
 
                 if not spot.pause_autowalk():
