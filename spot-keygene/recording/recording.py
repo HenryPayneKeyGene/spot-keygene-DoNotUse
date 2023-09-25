@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from argparse import Namespace
 
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
@@ -62,23 +63,18 @@ POSE_INDEX, ROBOT_CAMERA_INDEX, DOCK_INDEX, SCAN_INDEX = range(4)
 INITIAL_PANEL, RECORDED_PANEL, ACTION_PANEL, FINAL_PANEL = range(4)
 
 
-def start_recording(args):
+def start_recording(args: Namespace):
     """Record auto-walks with GUI"""
-
-    # Configure logging
-    bosdyn.client.util.setup_logging()
 
     config = {
         "name": "Spot Keygene (Record Autowalk)",
-        "addr": args.hostname,
-        "download_path": "/home/romir/Downloads/spot",
+        "addr": str(args.hostname),
     }
     spot = SpotClient(config)
     assert not spot.robot.is_estopped(), 'Robot is estopped. ' \
                                          'Please use an external E-Stop client, ' \
                                          'such as the estop SDK example, to configure E-Stop.'
 
-    # Power on and get lease
     app = QtWidgets.QApplication(sys.argv)
     gui = AutowalkGUI(spot)
     gui.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)

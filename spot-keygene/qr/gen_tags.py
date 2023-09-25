@@ -1,6 +1,7 @@
 import io
 import os
 import zipfile
+from typing import Dict
 
 import qrcode
 from PIL import Image, ImageDraw
@@ -37,7 +38,8 @@ def _add_info_to_qr(img, info):
     return new_img
 
 
-def gen_tags(path, tag_map=None, make_zip=False, add_info=True):
+def gen_tags(path: str, tag_map: Dict[int, str] = None, make_zip: bool = False, add_info: bool = True) -> None:
+    """Generate QR tags for the given actions."""
     if tag_map is None:
         tag_map = {i: c for i, c in enumerate(ACTIONS)}
     os.makedirs(path, exist_ok=True)
@@ -69,5 +71,5 @@ def gen_tags(path, tag_map=None, make_zip=False, add_info=True):
 
 if __name__ == "__main__":
     tags = {i: ACTIONS[i % len(ACTIONS)] for i in range(3 * len(ACTIONS))}
-    gen_tags("../../tags", tags, True)
+    gen_tags("../../data/tags", tags, True)
     print("Done.")

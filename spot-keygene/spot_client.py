@@ -1,7 +1,10 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
+
+"""
+A class to represent a Boston Dynamics Spot robot.
+Provides an abstraction layer over the Boston Dynamics SDK, including a simple interface and several convenience
+methods.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ from bosdyn.client.util import authenticate, setup_logging
 from bosdyn.client.world_object import WorldObjectClient
 from bosdyn.mission.client import MissionClient
 
-from .exceptions import NoMissionRunningException
+from .exceptions import AutowalkStartError, NoMissionRunningException
 from .globals import NAV_VELOCITY_LIMITS, VELOCITY_BASE_ANGULAR, VELOCITY_BASE_SPEED, VELOCITY_CMD_DURATION
 from .tasks import AsyncImage, AsyncRobotState, update_tasks
 from .util import get_img_source_list
@@ -47,7 +50,7 @@ class SpotClient:
     """
     A class to represent a Boston Dynamics Spot robot.
 
-    This class is a wrapper around the Boston Dynamics SDK.
+    This class is a wrapper around the Boston Dynamics SDK and provides a simple interface to control Spot.
     """
 
     robot: bosdyn.client.Robot
@@ -65,8 +68,6 @@ class SpotClient:
         self.name = config["name"]
         if async_tasks is None:
             async_tasks = []
-
-        self.state: str = "startup"
 
         setup_logging()
         print(f"Connecting to {self.name} at {self.addr}...")
@@ -109,13 +110,19 @@ class SpotClient:
         self.logger.info("Spot initialized, startup complete.")
 
     def __del__(self):
-        if self.state == "ready":
-            self.shutdown()
+        self.shutdown()
 
     @property
     def robot_state(self):
         """Get latest robot state proto."""
         return self.robot_state_task.proto
+
+    @property
+    def power_state(self):
+        state = self.robot_state
+        if not state:
+            return None
+        return state.power_state.motor_power_state
 
     @property
     def images(self):
@@ -124,17 +131,18 @@ class SpotClient:
 
     @property
     def mission_status(self):
+        """Get mission status."""
         return self.mission_client.get_state().status
 
     @property
     def is_docked(self) -> bool:
-        try:
-            return self.docking_client.get_docking_state().status == docking_pb2.DockState.STATUS_DOCKED
-        except:
-            return False
+        """Check if robot is docked."""
+        return (self.docking_client.get_docking_state().dock_state.status
+                == docking_pb2.DockState.DockedStatus.DOCK_STATUS_DOCKED)
 
     # basics
     def acquire(self):
+        """Acquire lease."""
         self.logger.debug("Waiting for time sync...")
         self.robot.time_sync.wait_for_sync()
         self.logger.debug("Time sync OK")
@@ -155,12 +163,18 @@ class SpotClient:
         return True
 
     def release(self):
+        """Release lease."""
         if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
             return
         self.lease_keep_alive.shutdown()
         self.logger.warn("Lease released.")
 
     def shutdown(self):
+        """
+        Shutdown robot.
+
+        This will power off the robot and release the lease.
+        """
         self.logger.warn("Shutting down...")
 
         if self.lease_keep_alive is not None and self.lease_keep_alive.is_alive():
@@ -174,7 +188,11 @@ class SpotClient:
         self.state = "shutdown"
         self.logger.warn("Shutdown complete")
 
+    def _request_power_on(self):
+        bosdyn.client.power.power_on(self.power_client)
+
     def power_on(self):
+        """Power on robot."""
         if self.robot.is_powered_on():
             return
         self.logger.info("Powering on...")
@@ -184,6 +202,7 @@ class SpotClient:
         self.logger.info("Power on complete")
 
     def power_off(self):
+        """Power off robot."""
         if not self.robot.is_powered_on():
             return
         self.logger.info("Powering off...")
@@ -192,7 +211,12 @@ class SpotClient:
         self.powered_on = False
         self.logger.info("Power off complete")
 
+    def safe_power_off(self):
+        """Power off robot safely."""
+        self._start_robot_command('safe_power_off', RobotCommandBuilder.safe_power_off_command())
+
     def dock(self, dock_id: int = None):
+        """Dock robot to a specific dock."""
         self.stand()
         try:
             blocking_dock_robot(self.robot, dock_id)
@@ -203,6 +227,7 @@ class SpotClient:
         return True
 
     def undock(self):
+        """Undock robot."""
         dock_id = get_dock_id(self.robot)
         if dock_id is None:
             self.logger.error("No dock found.")
@@ -216,13 +241,15 @@ class SpotClient:
         return True
 
     def toggle_time_sync(self):
+        """Toggle time sync."""
         if self.robot.time_sync.stopped:
             self.robot.time_sync.start()
         else:
             self.robot.time_sync.stop()
 
     def toggle_power(self):
-        power_state = self._power_state()
+        """Toggle robot power."""
+        power_state = self.power_state
         if power_state is None:
             self.logger.error('Could not toggle power because power state is unknown')
             return
@@ -231,18 +258,6 @@ class SpotClient:
             self._try_grpc("powering-on", self._request_power_on)
         else:
             self._try_grpc("powering-off", self.safe_power_off)
-
-    def _request_power_on(self):
-        bosdyn.client.power.power_on(self.power_client)
-
-    def safe_power_off(self):
-        self._start_robot_command('safe_power_off', RobotCommandBuilder.safe_power_off_command())
-
-    def _power_state(self):
-        state = self.robot_state
-        if not state:
-            return None
-        return state.power_state.motor_power_state
 
     # movement
 
@@ -262,6 +277,7 @@ class SpotClient:
         self._try_grpc(desc, _start_command)
 
     def self_right(self):
+        """Self right robot."""
         self._start_robot_command('self_right', RobotCommandBuilder.selfright_command())
 
     def sit(self):
@@ -297,6 +313,7 @@ class SpotClient:
             end_time_secs=time.time() + VELOCITY_CMD_DURATION)
 
     def return_to_origin(self):
+        """Return to origin."""
         self._start_robot_command(
             'fwd_and_rotate',
             RobotCommandBuilder.synchro_se2_trajectory_point_command(
@@ -313,7 +330,6 @@ class SpotClient:
 
     def get_qr_tags(self):
         """Return QR tags visible to robot."""
-
         detector = cv2.QRCodeDetector()
         tags: List[Tuple[str, np.ndarray]] = []
         for image_response in self.images:
@@ -332,7 +348,7 @@ class SpotClient:
                 tags.append((data, bbox))
         return tags
 
-    def save_images(self, path):
+    def save_images(self, path: str):
         """Save images to disk."""
         os.makedirs(path, exist_ok=True)
         for i, image_response in enumerate(self.images):
@@ -348,10 +364,7 @@ class SpotClient:
 
     # autowalk
     def _upload_graph_and_snapshots(self, path, disable_alternate_route_finding=False, timeout=60):
-        """
-        Uploads the graph and snapshots to the robot.
-        """
-
+        """Uploads the graph and snapshots to the robot."""
         # load the graph from the disk
         graph_filename = os.path.join(path, 'graph')
         self.logger.info(f"Loading graph from {graph_filename}")
@@ -411,9 +424,7 @@ class SpotClient:
             self.logger.info(f"Uploaded edge snapshot {snapshot_id}.")
 
     def _upload_autowalk(self, filename, timeout=60):
-        """
-        Uploads the autowalk to the robot.
-        """
+        """Uploads the autowalk to the robot."""
         self.logger.info(f"Loading autowalk from {filename}")
 
         autowalk = walks_pb2.Walk()
@@ -424,18 +435,14 @@ class SpotClient:
         self.autowalk_client.load_autowalk(autowalk, timeout=timeout)
         self.logger.info(f"Uploaded autowalk.")
 
-    def upload_autowalk(self, path, disable_alternate_route_finding=False, timeout=60):
-        """
-        Uploads the autowalk to the robot.
-        """
+    def upload_autowalk(self, path: str, disable_alternate_route_finding=False, timeout=60):
+        """Uploads the autowalk to the robot."""
         self._upload_graph_and_snapshots(path, disable_alternate_route_finding, timeout)
         self._upload_autowalk(os.path.join(path, 'missions/autogenerated.walk'), timeout)
 
     def start_autowalk(self, timeout=60, disable_directed_exploration=False,
                        path_following_mode=map_pb2.Edge.Annotations.PATH_MODE_UNKNOWN, do_localize=False):
-        """
-        Starts the autowalk.
-        """
+        """Starts the autowalk."""
         self.logger.info("Starting autowalk...")
 
         if do_localize:
@@ -456,7 +463,7 @@ class SpotClient:
         self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
 
         if mission_state.mission_id == -1:  # If no mission is loaded
-            raise Exception("No mission is loaded. Please upload a mission first.")
+            raise AutowalkStartError("No mission is loaded. Please upload a mission first.")
         while mission_state.status in (mission_pb2.State.STATUS_NONE, mission_pb2.State.STATUS_PAUSED):
             self.logger.info("Waiting for mission to start...")
             if mission_state.questions:
@@ -475,14 +482,12 @@ class SpotClient:
             mission_state = self.mission_client.get_state()
             self.logger.info(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
             if mission_state.status in (mission_pb2.State.STATUS_ERROR, mission_pb2.State.STATUS_FAILURE):
-                raise Exception(f"error starting autowalk: {mission_state.error}")
+                raise AutowalkStartError(f"error starting autowalk: {mission_state.error}")
 
         return mission_state.status in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED)
 
     def stop_autowalk(self):
-        """
-        Stops the autowalk.
-        """
+        """Stops the autowalk."""
         mission_state: mission_pb2.State = self.mission_client.get_state()
         if mission_state.status not in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED):
             raise NoMissionRunningException(f"Mission status: {mission_state.Status.Name(mission_state.status)}")
@@ -497,9 +502,7 @@ class SpotClient:
         return mission_state.status in (mission_pb2.State.STATUS_SUCCESS, mission_pb2.State.STATUS_STOPPED)
 
     def pause_autowalk(self):
-        """
-        Pauses the autowalk.
-        """
+        """Pauses the autowalk."""
         mission_state: mission_pb2.State = self.mission_client.get_state()
         if mission_state.status != mission_pb2.State.STATUS_RUNNING:
             raise NoMissionRunningException(f"Mission status: {mission_state.Status.Name(mission_state.status)}")

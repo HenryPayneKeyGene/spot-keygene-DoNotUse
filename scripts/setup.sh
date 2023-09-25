@@ -1,9 +1,6 @@
 #!/bin/bash
 
 # Copyright (c) Romir Kulshrestha 2023.
-# You may use, distribute and modify this code under the terms of the MIT License.
-# You should have received a copy of the MIT License with this file. If not, please visit:
-# https://opensource.org/licenses/MIT
 
 BASE_DIR=$(dirname "$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )")
 
@@ -29,16 +26,6 @@ popd || exit
 pushd "$BASE_DIR" || exit
     rm -rf ./dist/*
     python -m build
-    pip install ./dist/spot_keygene-*-py3-none-any.whl --force-reinstall
-
-popd
-
-if [ $(whoami) = "spot" ]
-then
-    # copy service files to systemd
-    sudo cp "$BASE_DIR"/scripts/lidar.service /etc/systemd/system/lidar.service
-    sudo systemctl daemon-reload
-else
-    echo "run as spot to add to systemd"
-fi
-
+    pip uninstall spot-keygene -y
+    pip install ./dist/*.whl
+popd || exit

@@ -1,10 +1,8 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
 
 import time
 from logging import Logger
+from typing import Set
 
 from bosdyn.api.mission import mission_pb2
 
@@ -15,7 +13,8 @@ from .spot_client import SpotClient
 from .util import countdown
 
 
-def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
+def __scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
+    """Perform a lidar scan."""
     start_time = time.time()
     duration = 30
     end_time = start_time + duration
@@ -24,7 +23,7 @@ def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
 
     spot.scan_pose(duration)
     scan_response = lidar.start_capture()
-    scan_id = scan_response.scan_id
+    scan_id: int = scan_response.scan_id
     attempts = 0
     while not lidar.is_scanning() and attempts < 20:
         time.sleep(0.5)
@@ -40,7 +39,7 @@ def scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
     return scan_id
 
 
-def upload(lidar, spot, logger):
+def __upload(_lidar, _spot, _logger):
     raise NotImplementedError
 
 
@@ -49,11 +48,7 @@ def main(mission_fiducials: set = None, logger: Logger = None):
     Main function for keygene.
     """
 
-    config = {
-        "name": "spot-keygene",
-        "addr": "192.168.80.3",
-        "path": "./autowalks/scan.walk",
-    }
+    config = {"name": "spot-keygene", "addr": "192.168.80.3", "path": "./autowalks/scan.walk"}
     spot: SpotClient = SpotClient(config)
     lidar: BLK_ARC = connect()
     logger: Logger = logger or spot.logger
@@ -76,7 +71,6 @@ def main(mission_fiducials: set = None, logger: Logger = None):
         while spot.robot.is_estopped():
             time.sleep(1)
 
-        spot.acquire()
         countdown(5)
         spot.power_on()
 
@@ -90,21 +84,24 @@ def main(mission_fiducials: set = None, logger: Logger = None):
             raise Exception("could not start autowalk")
 
         processed_tags = set()
-        scans = set()
+        scans: Set[int] = set()
         while True:
             if spot.mission_status not in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED):
                 break
+
             qrs = spot.get_qr_tags()
             if not qrs:
                 time.sleep(0.1)
                 continue
 
-            for data, bbox in qrs:
+            for data, _ in qrs:
                 try:
                     tag, command = data.split(":")
                 except ValueError:
                     continue
 
+                tag: int = int(tag)
+                command: str = command.lower()
                 if tag in processed_tags or command not in ACTIONS:
                     continue
 
@@ -116,10 +113,13 @@ def main(mission_fiducials: set = None, logger: Logger = None):
                     raise Exception("Failed to pause autowalk.")
 
                 if command == "scan":
-                    scan_id = scan(lidar, spot, logger)
-                    scans.add(scan_id)
+                    scan_id = __scan(lidar, spot, logger)
+                    if scan_id:
+                        scans.add(scan_id)
+                    else:
+                        logger.error("Failed to scan.")
                 elif command == "upload":
-                    upload(lidar, spot, logger)
+                    __upload(lidar, spot, logger)
                 elif command == "image":
                     spot.save_images("./images")
 
@@ -128,6 +128,9 @@ def main(mission_fiducials: set = None, logger: Logger = None):
 
         if not spot.dock(DOCK_ID):
             raise Exception("could not dock")
+
+        # TODO upload scans
+        # TODO upload images
     except Exception as e:
         logger.error(e)
     finally:

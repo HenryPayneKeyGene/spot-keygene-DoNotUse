@@ -1,7 +1,4 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
 
 import argparse
 import sys
@@ -43,27 +40,22 @@ options = parser.parse_args()
 
 if options.service == 'lidar':
     print("Starting LiDAR service...")
-
     lidar.start_lidar(options)
 elif options.service == 'record':
     print("Starting recording service...")
-
     recording.start_recording(options)
 elif options.service == 'qr':
     print("Generating QR codes...")
-
-
     if options.set:
         tags = {}
         for item in options.set:
             items = item.split('=')
-            key = items[0].strip()  # we remove blanks around keys, as is logical
+            key = int(items[0])
             if len(items) < 2:
                 raise argparse.ArgumentTypeError('You must provide a value for each key.')
             value = '='.join(items[1:])
             if value == "":
                 raise argparse.ArgumentTypeError('You must provide a value for each key.')
-            # noinspection PyUnboundLocalVariable
             tags[key] = value
     else:
         tags = {i: ACTIONS[i % len(ACTIONS)] for i in range(3 * len(ACTIONS))}
@@ -72,5 +64,4 @@ elif options.service == 'qr':
     sys.exit(0)
 else:
     print("Starting...")
-
     keygene.main()

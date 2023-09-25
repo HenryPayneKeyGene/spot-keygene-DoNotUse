@@ -1,7 +1,6 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
+
+"""Utility functions."""
 
 import logging
 import signal
@@ -23,22 +22,6 @@ class Universe(set):
 
     def __contains__(self, _):
         return True
-
-
-def get_img_source_list(image_client):
-    """Gets a list of image sources and filters based on config dictionary
-
-    Args:
-        image_client: Instantiated image client
-    """
-
-    # We are using only the visual images with their corresponding depth sensors
-    sources = image_client.list_image_sources()
-    source_list = []
-    for source in sources:
-        if source.image_type == ImageSource.IMAGE_TYPE_VISUAL:
-            source_list.append(source.name)
-    return source_list
 
 
 class ExitCheck:
@@ -68,9 +51,25 @@ class ExitCheck:
         return self._kill_now
 
 
-def id_to_short_code(id):
+def get_img_source_list(image_client):
+    """Gets a list of image sources and filters based on config dictionary
+
+    Args:
+        image_client: Instantiated image client
+    """
+
+    # We are using only the visual images with their corresponding depth sensors
+    sources = image_client.list_image_sources()
+    source_list = []
+    for source in sources:
+        if source.image_type == ImageSource.IMAGE_TYPE_VISUAL:
+            source_list.append(source.name)
+    return source_list
+
+
+def id_to_short_code(_id):
     """Convert a unique id to a 2 letter short code."""
-    tokens = id.split('-')
+    tokens = _id.split('-')
     if len(tokens) > 2:
         return '%c%c' % (tokens[0][0], tokens[1][0])
     return None

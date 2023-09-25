@@ -1,5 +1,5 @@
 [project]
-name = ""
+name = "keygene"
 version = "0.2.0"
 description = "Code for the KeyGene project at YES!Delft"
 authors = [
@@ -29,3 +29,6 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/romirk/spot-keygene"
 Home-Page = "https://romir.eu/"
+
+[project.scripts]
+kg = "keygene.__main__:main"

@@ -1,21 +1,20 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
+
 import logging
 import time
 
 from bosdyn.client.async_tasks import AsyncPeriodicQuery, AsyncTasks
 from bosdyn.client.robot_state import RobotStateClient
 
-
 UPDATE_INTERVAL = 0.1  # s
 
 
 def update_tasks(async_tasks: AsyncTasks):
+    """Update all async tasks."""
     while True:
         async_tasks.update()
         time.sleep(UPDATE_INTERVAL)
+
 
 class AsyncRobotState(AsyncPeriodicQuery):
     """Grab robot state."""

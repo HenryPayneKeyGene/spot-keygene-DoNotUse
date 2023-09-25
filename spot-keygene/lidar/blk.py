@@ -1,7 +1,4 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-#  You may use, distribute and modify this code under the terms of the MIT License.
-#  You should have received a copy of the MIT License with this file. If not, please visit:
-#  https://opensource.org/licenses/MIT
 
 import logging
 
@@ -12,7 +9,8 @@ from blk_arc_api.blk_arc_config import ConnectionType
 CONNECTION_TYPE = ConnectionType.WIRED
 
 
-def connect(blk_arc=BLK_ARC(), logger=logging.getLogger(__name__)):
+def connect(blk_arc: BLK_ARC = BLK_ARC(), logger=logging.getLogger(__name__)):
+    """Connect to the BLK ARC and get some information."""
     # Connect:
     if not blk_arc.connect(CONNECTION_TYPE):
         logger.warning(
