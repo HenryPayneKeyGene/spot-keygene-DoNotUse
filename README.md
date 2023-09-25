@@ -21,6 +21,22 @@ Built by Romir Kulshrestha for YES!Delft for the Keygene project, 2023.
 
 1. `cd` into the repository.
 2. activate the virtual environment with `pyenv activate kg`.
-3. run `spot-keygene record [SPOT_IP]` to record a scan.
+3. run `python -m spot-keygene record [SPOT_IP]` to record a scan.
 4. Use the GUI to control the robot and record a mission, and save it to a
    chosen location.
+
+### Scanning
+
+1. `cd` into the repository.
+2. activate the virtual environment with `pyenv activate kg`.
+3. run `python -m spot-keygene --walk <MISSION_DIR>` to scan a mission using a
+   walking
+   pattern.
+
+### Actions
+
+1. `cd` into the repository.
+2. activate the virtual environment with `pyenv activate kg`.
+3. run `python -m spot-keygene qr` to generate a set of QR codes for the
+   mission. See the
+   `--help` for more options.
