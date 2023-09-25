@@ -12,5 +12,5 @@ import importlib_metadata
 
 try:
     __version__ = importlib_metadata.version("keygene")
-except:
+except importlib_metadata.PackageNotFoundError:
     __version__ = "unknown (check package metadata)"

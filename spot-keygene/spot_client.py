@@ -185,7 +185,6 @@ class SpotClient:
         self.robot.time_sync.stop()
         self.logger.info("Time sync stopped")
 
-        self.state = "shutdown"
         self.logger.warn("Shutdown complete")
 
     def _request_power_on(self):
@@ -447,10 +446,8 @@ class SpotClient:
 
         if do_localize:
             # Localize robot
-            localization_error = False
-            graph = self.graph_nav_client.download_graph(timeout=timeout)
+            self.graph_nav_client.download_graph(timeout=timeout)
             self.logger.info('Localizing robot...')
-            robot_state = self.state_client.get_robot_state()
             localization = nav_pb2.Localization()
 
             # Attempt to localize using any visible fiducial
