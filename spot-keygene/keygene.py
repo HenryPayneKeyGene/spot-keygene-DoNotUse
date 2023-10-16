@@ -2,7 +2,7 @@
 
 import time
 from logging import Logger
-from typing import Set
+from typing import List, Set
 
 from bosdyn.api.mission import mission_pb2
 
@@ -43,21 +43,32 @@ def __upload(_lidar, _spot, _logger):
     raise NotImplementedError
 
 
-def main(mission_fiducials: set = None, logger: Logger = None):
+def kg_run(
+    mission_name: str,
+    spot: SpotClient,
+    lidar: BLK_ARC,
+    logger: Logger = None,
+    mission_fiducials: set = None,
+):
     """
     Main function for keygene.
     """
 
-    config = {"name": "spot-keygene", "addr": "192.168.80.3", "path": "./autowalks/scan.walk"}
-    spot: SpotClient = SpotClient(config)
-    lidar: BLK_ARC = connect()
+    config = {
+        "name": "spot-keygene",
+        "addr": "192.168.80.3",
+        "path": f"./autowalks/{mission_name}.walk",
+    }
+
     logger: Logger = logger or spot.logger
 
     try:
         spot.release()
 
         # mission_fiducials = Universe()
-        logger.info("Waiting for fiducials to be visible... Move the robot to a location where fiducials are visible.")
+        logger.info(
+            "Waiting for fiducials to be visible... Move the robot to a location where fiducials are visible."
+        )
         if mission_fiducials is None:
             while not spot.get_visible_fiducials():
                 time.sleep(0.2)
@@ -86,7 +97,10 @@ def main(mission_fiducials: set = None, logger: Logger = None):
         processed_tags = set()
         scans: Set[int] = set()
         while True:
-            if spot.mission_status not in (mission_pb2.State.STATUS_RUNNING, mission_pb2.State.STATUS_PAUSED):
+            if spot.mission_status not in (
+                mission_pb2.State.STATUS_RUNNING,
+                mission_pb2.State.STATUS_PAUSED,
+            ):
                 break
 
             qrs = spot.get_qr_tags()
@@ -135,6 +149,16 @@ def main(mission_fiducials: set = None, logger: Logger = None):
         logger.error(e)
     finally:
         spot.shutdown()
-        lidar.disconnect()
 
     logger.info("exiting")
+
+
+def run_many(missions: List[str]):
+    """
+    Run multiple missions.
+    """
+
+    spot: SpotClient = SpotClient()
+    lidar: BLK_ARC = connect()
+    for mission in missions:
+        kg_run(mission, spot, lidar)

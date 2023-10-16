@@ -64,4 +64,4 @@ elif options.service == 'qr':
     sys.exit(0)
 else:
     print("Starting...")
-    keygene.main()
+    keygene.run_many("scan")
