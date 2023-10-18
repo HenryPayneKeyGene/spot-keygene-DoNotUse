@@ -144,7 +144,8 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         self._graph_nav_client = self.spot.graph_nav_client
         # Clear graph to ensure only the data recorded using this example gets packaged into map
         self._graph_nav_client.clear_graph()
-        self._recording_client = self.robot.ensure_client(GraphNavRecordingServiceClient.default_service_name)
+        self._recording_client: GraphNavRecordingServiceClient = self.robot.ensure_client(
+            GraphNavRecordingServiceClient.default_service_name)
         self._world_object_client = self.spot.world_object_client
         self._docking_client = self.robot.ensure_client(DockingClient.default_service_name)
 
