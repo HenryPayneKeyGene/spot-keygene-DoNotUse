@@ -143,8 +143,6 @@ def kg_run(
         if not spot.dock(DOCK_ID):
             raise Exception("could not dock")
 
-        # TODO upload scans
-        # TODO upload images
     except Exception as e:
         logger.error(e)
     finally:

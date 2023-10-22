@@ -6,7 +6,6 @@
 
 """WASD driving of robot."""
 import curses
-import io
 import logging
 import os
 import signal
@@ -658,13 +657,6 @@ class WasdInterface(object):
                 goal_x=0.0, goal_y=0.0, goal_heading=0.0, frame_name=ODOM_FRAME_NAME, params=None,
                 body_height=0.0, locomotion_hint=spot_command_pb2.HINT_SPEED_SELECT_TROT),
             end_time_secs=time.time() + 20)
-
-    def _take_ascii_image(self):
-        source_name = 'frontright_fisheye_image'
-        image_response = self._image_client.get_image_from_sources([source_name])
-        image = Image.open(io.BytesIO(image_response[0].shot.image.data))
-        ascii_image = self._ascii_converter.convert_to_ascii(image, new_width=70)
-        self._last_image_ascii = ascii_image
 
     def _toggle_ascii_video(self):
         if self._video_mode:
