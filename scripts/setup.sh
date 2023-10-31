@@ -22,7 +22,7 @@ pushd "$BASE_DIR"/BLKARC-Module-API_TuDelft/src/blk_arc_api || exit
     ./install.sh
 popd || exit
 
-# install spot-keygene
+# install spotkg
 pushd "$BASE_DIR" || exit
     rm -rf ./dist/*
     python -m build

@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from ..globals import ACTIONS
 
-_LOGO = Image.open("./spot-keygene/logo.png")
+_LOGO = Image.open("./spotkg/logo.png")
 
 
 def _add_info_to_qr(img, info):

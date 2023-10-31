@@ -6,6 +6,7 @@
 
 """WASD driving of robot."""
 import curses
+import curses.textpad
 import logging
 import os
 import signal
@@ -203,6 +204,8 @@ class AsyncImageCapture(AsyncGRPCTask):
 class WasdInterface(object):
     """A curses interface for driving the robot."""
 
+    _lease_keepalive: LeaseKeepAlive
+
     def __init__(self, robot):
 
         self.robot: Robot = robot
@@ -210,9 +213,9 @@ class WasdInterface(object):
         self.strings = Namespace(rec="Start recording")
 
         self._robot_id = self.robot.get_id()
-        self._lease_keepalive = None
         self.walk = self._init_walk()
         self.directory = os.getcwd()
+        self.walk_name = self.robot.get_id().nickname + f"_{time.strftime('%Y%m%d_%H%M%S')}"
 
         # Initialize clients
         self._lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
@@ -302,7 +305,6 @@ class WasdInterface(object):
 
         # Stuff that is set in start()
         self._robot_id = None
-        self._lease_keepalive: LeaseKeepAlive = None
 
     def __del__(self):
         if self._recording_client is not None:
@@ -383,11 +385,11 @@ class WasdInterface(object):
         if self._lease_keepalive:
             self._lease_keepalive.shutdown()
 
-    def flush_and_estop_buffer(self, stdscr):
+    def flush_and_estop_buffer(self, screen):
         """Manually flush the curses input buffer but trigger any estop requests (space)"""
         key = ''
         while key != -1:
-            key = stdscr.getch()
+            key = screen.getch()
             if key == ord(' '):
                 self._toggle_estop()
 
@@ -406,16 +408,20 @@ class WasdInterface(object):
         """Get latest robot state proto."""
         return self._robot_state_task.proto
 
-    def drive(self, stdscr):
+    def drive(self, screen: "curses.window"):
         """User interface to control the robot via the passed-in curses screen interface object."""
         with ExitCheck() as self._exit_check:
             curses_handler = CursesHandler(self)
             curses_handler.setLevel(logging.INFO)
             LOGGER.addHandler(curses_handler)
 
-            stdscr.nodelay(True)  # Don't block for user input.
-            stdscr.resize(26, 140)
-            stdscr.refresh()
+            screen.nodelay(True)  # Don't block for user input.
+            screen.resize(26, 140)
+            screen.refresh()
+
+            # get directory for saving autowalks as well as walk name from user
+            curses.noecho()
+            self._path_window(screen)
 
             # for debug
             curses.echo()
@@ -423,12 +429,12 @@ class WasdInterface(object):
             try:
                 while not self._exit_check.kill_now:
                     self._async_tasks.update()
-                    self._drive_draw(stdscr, self._lease_keepalive)
+                    self._drive_draw(screen, self._lease_keepalive)
 
                     try:
-                        cmd = stdscr.getch()
+                        cmd = screen.getch()
                         # Do not queue up commands on client
-                        self.flush_and_estop_buffer(stdscr)
+                        self.flush_and_estop_buffer(screen)
                         self._drive_cmd(cmd)
                         time.sleep(COMMAND_INPUT_RATE)
                     except Exception:
@@ -440,40 +446,61 @@ class WasdInterface(object):
             finally:
                 LOGGER.removeHandler(curses_handler)
 
-    def _drive_draw(self, stdscr, lease_keep_alive):
+    def _path_window(self, screen):
+        screen.clear()
+        rows, cols = screen.getmaxyx()
+        path_win = curses.newwin(10, 40, rows // 2 - 5, cols // 2 - 20)
+        path_win.border(0)
+        path_win.addstr(0, 2, "Login")
+        path_win.addstr(4, 2, "Path:")
+        path_win.refresh()
+
+        path_textbox = curses.textpad.Textbox(
+            path_win.derwin(1, 20, 4, 12))
+        path_textbox.edit()
+
+        path_win.addstr(5, 2, "Name:")
+        name_textbox = curses.textpad.Textbox(
+            path_win.derwin(1, 20, 5, 12))
+        name_textbox.edit()
+
+        self.walk_name = name_textbox.gather().strip()
+        self.directory = path_textbox.gather().strip()
+
+    def _drive_draw(self, screen, lease_keep_alive):
         """Draw the interface screen at each update."""
-        stdscr.clear()  # clear screen
-        stdscr.resize(26, 140)
-        stdscr.addstr(0, 0, f'{self._robot_id.nickname:20s} {self._robot_id.serial_number}')
-        stdscr.addstr(1, 0, self._lease_str(lease_keep_alive))
-        stdscr.addstr(2, 0, self._battery_str())
-        stdscr.addstr(3, 0, self._estop_str())
-        stdscr.addstr(4, 0, self._power_state_str())
-        stdscr.addstr(5, 0, self._time_sync_str())
+        screen.clear()  # clear screen
+        screen.resize(26, 140)
+        screen.addstr(0, 0, f'{self._robot_id.nickname:20s} {self._robot_id.serial_number}')
+        screen.addstr(1, 0, self._lease_str(lease_keep_alive))
+        screen.addstr(2, 0, self._battery_str())
+        screen.addstr(3, 0, self._estop_str())
+        screen.addstr(4, 0, self._power_state_str())
+        screen.addstr(5, 0, self._time_sync_str())
         for i in range(3):
-            stdscr.addstr(7 + i, 2, self.message(i))
-        stdscr.addstr(10, 0, 'Commands: [TAB]: quit                               ')
-        stdscr.addstr(11, 0, '          [T]: Time-sync, [SPACE]: Estop, [P]: Power')
-        stdscr.addstr(12, 0, '          [I]: Take image, [O]: Video mode          ')
-        stdscr.addstr(13, 0, '          [f]: Stand, [r]: Self-right               ')
-        stdscr.addstr(14, 0, '          [v]: Sit, [b]: Battery-change             ')
-        stdscr.addstr(15, 0, '          [wasd]: Directional strafing              ')
-        stdscr.addstr(16, 0, '          [qe]: Turning, [ESC]: Stop                ')
-        stdscr.addstr(17, 0, '          [l]: Return/Acquire lease                 ')
-        stdscr.addstr(18, 0, '')
-        stdscr.addstr(19, 0, f"          [1]: {self.strings.rec} [2]: Save")
-        stdscr.addstr(20, 0, '')
+            screen.addstr(7 + i, 2, self.message(i))
+        screen.addstr(10, 0, 'Commands: [TAB]: quit                               ')
+        screen.addstr(11, 0, '          [T]: Time-sync, [SPACE]: Estop, [P]: Power')
+        screen.addstr(12, 0, '          [I]: Take image, [O]: Video mode          ')
+        screen.addstr(13, 0, '          [f]: Stand, [r]: Self-right               ')
+        screen.addstr(14, 0, '          [v]: Sit, [b]: Battery-change             ')
+        screen.addstr(15, 0, '          [wasd]: Directional strafing              ')
+        screen.addstr(16, 0, '          [qe]: Turning, [ESC]: Stop                ')
+        screen.addstr(17, 0, '          [l]: Return/Acquire lease                 ')
+        screen.addstr(18, 0, '')
+        screen.addstr(19, 0, f"          [1]: {self.strings.rec} [2]: Save")
+        screen.addstr(20, 0, '')
 
         # print as many lines of the image as will fit on the curses screen
         if self._image_task.ascii_image is not None:
-            max_y, _max_x = stdscr.getmaxyx()
+            max_y, _max_x = screen.getmaxyx()
             for y_i, img_line in enumerate(self._image_task.ascii_image):
                 if y_i + 19 >= max_y:
                     break
 
-                stdscr.addstr(y_i + 19, 0, img_line)
+                screen.addstr(y_i + 19, 0, img_line)
 
-        stdscr.refresh()
+        screen.refresh()
 
     def _drive_cmd(self, key):
         """Run user commands at each update."""
@@ -587,12 +614,10 @@ class WasdInterface(object):
     def _toggle_lease(self):
         """toggle lease acquisition. Initial state is acquired"""
         if self._lease_client is not None:
-            if self._lease_keepalive is None:
-                self._lease_keepalive = LeaseKeepAlive(self._lease_client, must_acquire=True,
-                                                       return_at_exit=True)
+            if not self._lease_keepalive.is_alive():
+                self._lease_keepalive = LeaseKeepAlive(self._lease_client, must_acquire=True, return_at_exit=True)
             else:
                 self._lease_keepalive.shutdown()
-                self._lease_keepalive = None
 
     def _start_robot_command(self, desc, command_proto, end_time_secs=None):
 
@@ -793,17 +818,7 @@ def main():
     """Command-line interface."""
     stream_handler = _setup_logging(False)
 
-    # Create robot object.
-    sdk = create_standard_sdk('WASDClient')
-    robot = sdk.create_robot("192.168.80.3")
-    try:
-        bosdyn.client.util.authenticate(robot)
-        robot.start_time_sync()
-    except RpcError as err:
-        LOGGER.error('Failed to communicate with robot: %s', err)
-        return False
-
-    wasd_interface = WasdInterface(robot)
+    wasd_interface = WasdInterface()
     try:
         wasd_interface.start()
     except (ResponseError, RpcError) as err:

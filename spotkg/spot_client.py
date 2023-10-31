@@ -56,8 +56,8 @@ class SpotClient:
     robot: bosdyn.client.Robot
     sdk: bosdyn.client.Sdk
 
-    command_client: RobotCommandClient
-    state_client: RobotStateClient
+    robot_command_client: RobotCommandClient
+    robot_state_client: RobotStateClient
     lease_client: LeaseClient
 
     lease_keep_alive: LeaseKeepAlive | None
@@ -83,8 +83,9 @@ class SpotClient:
         self.robot.start_time_sync()
 
         # initialize clients
-        self.command_client: RobotCommandClient = self.robot.ensure_client(RobotCommandClient.default_service_name)
-        self.state_client: RobotStateClient = self.robot.ensure_client(RobotStateClient.default_service_name)
+        self.robot_command_client: RobotCommandClient = self.robot.ensure_client(
+            RobotCommandClient.default_service_name)
+        self.robot_state_client: RobotStateClient = self.robot.ensure_client(RobotStateClient.default_service_name)
         self.lease_client: LeaseClient = self.robot.ensure_client(LeaseClient.default_service_name)
         self.estop_client: EstopClient = self.robot.ensure_client(EstopClient.default_service_name)
         self.world_object_client: WorldObjectClient = self.robot.ensure_client(WorldObjectClient.default_service_name)
@@ -95,10 +96,11 @@ class SpotClient:
         self.img_client: ImageClient = self.robot.ensure_client(ImageClient.default_service_name)
         self.docking_client: DockingClient = self.robot.ensure_client(DockingClient.default_service_name)
 
-        self.robot_state_task = AsyncRobotState(self.state_client)
+        self.robot_state_task = AsyncRobotState(self.robot_state_client)
         self.image_task = AsyncImage(self.img_client, get_img_source_list(self.img_client))
         async_tasks = AsyncTasks([self.robot_state_task, self.image_task] + async_tasks)
         update_thread = threading.Thread(target=update_tasks, daemon=True, args=[async_tasks])
+        self.logger.info("Starting async thread...")
         update_thread.start()
 
         self.estop_keep_alive = None
@@ -148,11 +150,11 @@ class SpotClient:
         self.logger.debug("Time sync OK")
 
         if self.lease_keep_alive is not None and self.lease_keep_alive.is_alive():
-            self.logger.warn("Lease already acquired.")
+            self.logger.warning("Lease already acquired.")
             return True
 
         if not hasattr(self, "_estop"):
-            self.logger.warn("EStop not configured -- please use an external EStop client.")
+            self.logger.warning("EStop not configured -- please use an external EStop client.")
 
         try:
             self.lease_keep_alive = LeaseKeepAlive(self.lease_client, must_acquire=True, return_at_exit=True)
@@ -167,7 +169,14 @@ class SpotClient:
         if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
             return
         self.lease_keep_alive.shutdown()
-        self.logger.warn("Lease released.")
+        self.logger.warning("Lease released.")
+
+    def toggle_lease(self):
+        """toggle lease acquisition. Initial state is acquired"""
+        if self.lease_keep_alive is None or not self.lease_keep_alive.is_alive():
+            self.lease_keep_alive = LeaseKeepAlive(self.lease_client, must_acquire=True, return_at_exit=True)
+        else:
+            self.lease_keep_alive.shutdown()
 
     def shutdown(self):
         """
@@ -175,9 +184,12 @@ class SpotClient:
 
         This will power off the robot and release the lease.
         """
-        self.logger.warn("Shutting down...")
+        self.logger.warning("Shutting down...")
 
-        if self.lease_keep_alive is not None and self.lease_keep_alive.is_alive():
+        if not hasattr(self, "robot_id"):
+            self.logger.warning("Robot not initialized.")
+            return
+        if self.lease_keep_alive.is_alive():
             self.power_off()
             self.release()
 
@@ -185,7 +197,7 @@ class SpotClient:
         self.robot.time_sync.stop()
         self.logger.info("Time sync stopped")
 
-        self.logger.warn("Shutdown complete")
+        self.logger.warning("Shutdown complete")
 
     def _request_power_on(self):
         bosdyn.client.power.power_on(self.power_client)
@@ -254,13 +266,13 @@ class SpotClient:
             return
 
         if power_state == robot_state_proto.PowerState.STATE_OFF:
-            self._try_grpc("powering-on", self._request_power_on)
+            self.try_grpc("powering-on", self._request_power_on)
         else:
-            self._try_grpc("powering-off", self.safe_power_off)
+            self.try_grpc("powering-off", self.safe_power_off)
 
     # movement
 
-    def _try_grpc(self, desc: str, thunk: Callable):
+    def try_grpc(self, desc: str, thunk: Callable):
         try:
             return thunk()
         except (ResponseError, RpcError) as err:
@@ -270,10 +282,10 @@ class SpotClient:
     def _start_robot_command(self, desc: str, command_proto, end_time_secs: float = None):
 
         def _start_command():
-            self.command_client.robot_command(lease=None, command=command_proto,
-                                              end_time_secs=end_time_secs)
+            self.robot_command_client.robot_command(lease=None, command=command_proto,
+                                                    end_time_secs=end_time_secs)
 
-        self._try_grpc(desc, _start_command)
+        self.try_grpc(desc, _start_command)
 
     def self_right(self):
         """Self right robot."""
@@ -310,6 +322,17 @@ class SpotClient:
         self._start_robot_command(
             desc, RobotCommandBuilder.synchro_velocity_command(v_x=v_x, v_y=v_y, v_rot=v_rot),
             end_time_secs=time.time() + VELOCITY_CMD_DURATION)
+
+    def cmd_vel(self, linear, angular):
+        self._start_robot_command(
+            'cmd_vel', RobotCommandBuilder.synchro_velocity_command(linear, 0, angular),
+            end_time_secs=time.time() + VELOCITY_CMD_DURATION)
+
+    def stow(self):
+        self._start_robot_command('stow', RobotCommandBuilder.arm_stow_command())
+
+    def unstow(self):
+        self._start_robot_command('stow', RobotCommandBuilder.arm_ready_command())
 
     def return_to_origin(self):
         """Return to origin."""

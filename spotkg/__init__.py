@@ -1,5 +1,5 @@
 """
-spot-keygene
+spotkg
 ============
 
 A Python package developed for the Spot Keygene project. This package is
@@ -14,3 +14,8 @@ try:
     __version__ = importlib_metadata.version("keygene")
 except importlib_metadata.PackageNotFoundError:
     __version__ = "unknown (check package metadata)"
+
+
+def recorder_driver():
+    from . import recording
+    recording.start_recording()

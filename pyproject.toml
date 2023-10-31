@@ -24,6 +24,8 @@ dependencies = [
     "qrcode",
     "tqdm",
     "windows-curses ; sys_platform == 'win32'",
+    "nicegui",
+    "python-socketio<5.10.0"
 ]
 
 [project.urls]

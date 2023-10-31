@@ -139,8 +139,8 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         # Initialize clients
         self._lease_client = self.spot.lease_client
         self._power_client = self.spot.power_client
-        self._robot_state_client = self.spot.state_client
-        self._robot_command_client = self.spot.command_client
+        self._robot_state_client = self.spot.robot_state_client
+        self._robot_command_client = self.spot.robot_command_client
         self._graph_nav_client = self.spot.graph_nav_client
         # Clear graph to ensure only the data recorded using this example gets packaged into map
         self._graph_nav_client.clear_graph()

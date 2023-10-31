@@ -55,7 +55,7 @@ def kg_run(
     """
 
     config = {
-        "name": "spot-keygene",
+        "name": "spotkg",
         "addr": "192.168.80.3",
         "path": f"./autowalks/{mission_name}.walk",
     }
