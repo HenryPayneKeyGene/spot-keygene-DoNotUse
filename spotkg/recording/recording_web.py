@@ -460,7 +460,7 @@ class RecorderGUI(object):
                 ui.label('Control').classes('text-2xl')
                 self.joy = ui.joystick(color='blue', size=50,
                                        on_move=lambda e: cmd_vel(float(e.y) * LINEAR_VELOCITY_DEFAULT,
-                                                                 float(e.x) * ANGULAR_VELOCITY_DEFAULT),
+                                                                 float(-e.x) * ANGULAR_VELOCITY_DEFAULT),
                                        on_end=lambda _: cmd_vel(0.0, 0.0))
                 ui.label('Publish steering commands by dragging your mouse around in the blue field').classes(
                     'mt-6')

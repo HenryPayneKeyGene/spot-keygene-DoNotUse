@@ -1,10 +1,13 @@
 #  Copyright (c) Romir Kulshrestha 2023.
-
+import os.path
 import time
+from datetime import datetime
 from logging import Logger
-from typing import List, Set
+from queue import PriorityQueue
+from typing import List, Set, Tuple
 
 from bosdyn.api.mission import mission_pb2
+from nicegui import ui
 
 from blk_arc_api.blk_arc import BLK_ARC
 from .globals import ACTIONS, DOCK_ID
@@ -12,6 +15,8 @@ from .lidar.blk import connect
 from .spot_client import SpotClient
 from .util import countdown
 
+
+# from .local_file_picker import local_file_picker
 
 def __scan(lidar: BLK_ARC, spot: SpotClient, logger: Logger):
     """Perform a lidar scan."""
@@ -43,22 +48,16 @@ def __upload(_lidar, _spot, _logger):
     raise NotImplementedError
 
 
-def kg_run(
-    mission_name: str,
-    spot: SpotClient,
-    lidar: BLK_ARC,
-    logger: Logger = None,
-    mission_fiducials: set = None,
+def run_one(
+        mission: str,
+        spot: SpotClient,
+        lidar: BLK_ARC,
+        logger: Logger = None,
+        mission_fiducials: set = None,
 ):
     """
     Main function for keygene.
     """
-
-    config = {
-        "name": "spotkg",
-        "addr": "192.168.80.3",
-        "path": f"./autowalks/{mission_name}.walk",
-    }
 
     logger: Logger = logger or spot.logger
 
@@ -90,7 +89,7 @@ def kg_run(
         except Exception as e:
             logger.warning(e)
 
-        spot.upload_autowalk(config["path"])
+        spot.upload_autowalk(mission)
         if not spot.start_autowalk(do_localize=True):
             raise Exception("could not start autowalk")
 
@@ -98,8 +97,8 @@ def kg_run(
         scans: Set[int] = set()
         while True:
             if spot.mission_status not in (
-                mission_pb2.State.STATUS_RUNNING,
-                mission_pb2.State.STATUS_PAUSED,
+                    mission_pb2.State.STATUS_RUNNING,
+                    mission_pb2.State.STATUS_PAUSED,
             ):
                 break
 
@@ -156,7 +155,63 @@ def run_many(missions: List[str]):
     Run multiple missions.
     """
 
-    spot: SpotClient = SpotClient()
-    lidar: BLK_ARC = connect()
+    spot: SpotClient = SpotClient(config={
+        "name": "spotkg",
+        "addr": "192.168.80.3",
+
+    })
+    try:
+        lidar: BLK_ARC = connect()
+    except:
+        lidar = None
     for mission in missions:
-        kg_run(mission, spot, lidar)
+        run_one(f"./autowalks/{mission}.walk", spot, lidar)
+
+
+execution_order: "PriorityQueue[]" = PriorityQueue()
+execution_order.put((time.mktime(datetime.now().timetuple()), "test"))
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@ui.refreshable
+def exec_table():
+    cols = [{'name': 'Time', 'type': 'string', 'sortable': True}, {'name': 'Mission', 'type': 'string'}]
+    rows = [{'Time': str(datetime.fromtimestamp(time)), 'Mission': mission} for time, mission in execution_order.queue]
+    print(rows)
+    ui.table(cols, rows, row_key='Time')
+
+
+def add_to_queue(mission: str, schedule = None):
+    if schedule is None:
+        schedule = int(datetime.now())
+    else:
+        schedule = int(datetime.strptime(schedule, "%H:%M"))
+    execution_order.put((schedule or datetime.now().timetuple(), mission))
+    exec_table.refresh()
+
+
+schedule = datetime.now()
+
+
+# async def pick_file() -> None:
+#     result = await local_file_picker('~', multiple=True)
+#     ui.notify(f'You chose {result}')
+
+
+def set_schedule(e):
+    global schedule
+    schedule = e.value
+
+
+def gui():
+    # ui.title("Keygene")
+    exec_table()
+    time_picker = ui.time(value='12:00', on_change=set_schedule)
+
+    # ui.button('Choose file', on_click=pick_file, i/con='folder')
+    file_picker = ui.input("Mission", placeholder="Choose file", value=os.path.join(os.getcwd(), "autowalks"))
+
+    ui.button("Add to queue", on_click=lambda: add_to_queue(file_picker.value, time_picker.value), icon="plus")
+    ui.run()
