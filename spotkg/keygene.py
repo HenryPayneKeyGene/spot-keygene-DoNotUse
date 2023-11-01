@@ -1,10 +1,11 @@
 #  Copyright (c) Romir Kulshrestha 2023.
 import os.path
+import threading
 import time
 from datetime import datetime
 from logging import Logger
 from queue import PriorityQueue
-from typing import List, Set, Tuple
+from typing import List, Set
 
 from bosdyn.api.mission import mission_pb2
 from nicegui import ui
@@ -168,27 +169,49 @@ def run_many(missions: List[str]):
         run_one(f"./autowalks/{mission}.walk", spot, lidar)
 
 
-execution_order: "PriorityQueue[]" = PriorityQueue()
-execution_order.put((time.mktime(datetime.now().timetuple()), "test"))
+execution_order: PriorityQueue = PriorityQueue()
+execution_order.put((int(datetime.utcnow().timestamp()), ["tst"]))
+running = False
 
-from dataclasses import dataclass, field
-from typing import Any
+
+def __run_queue():
+    while running:
+        if execution_order.empty():
+            time.sleep(1)
+            print("waiting...")
+            continue
+        schedule, mission = execution_order.get()
+        print(f"NXT: {mission} @ {datetime.utcfromtimestamp(schedule)}")
+        while schedule > datetime.utcnow().timestamp():
+            time.sleep(0.1)
+        try:
+            run_many(mission)
+        except Exception as e:
+            print(e)
+
+
+def queue_runner():
+    global running
+    running = True
+    thread = threading.Thread(target=__run_queue, daemon=True)
+    thread.start()
 
 
 @ui.refreshable
 def exec_table():
-    cols = [{'name': 'Time', 'type': 'string', 'sortable': True}, {'name': 'Mission', 'type': 'string'}]
-    rows = [{'Time': str(datetime.fromtimestamp(time)), 'Mission': mission} for time, mission in execution_order.queue]
-    print(rows)
+    cols = [{'name': 'Time', 'label': 'Time', 'field': 'Time', 'sortable': True},
+            {'name': 'Mission', 'label': 'Mission', 'field': 'Mission', 'sortable': False}]
+    rows = [{'Time': datetime.utcfromtimestamp(t), 'Mission': ",".join(m for m in mission)} for t, mission in
+            execution_order.queue]
     ui.table(cols, rows, row_key='Time')
 
 
-def add_to_queue(mission: str, schedule = None):
-    if schedule is None:
-        schedule = int(datetime.now())
-    else:
-        schedule = int(datetime.strptime(schedule, "%H:%M"))
-    execution_order.put((schedule or datetime.now().timetuple(), mission))
+def add_to_queue(mission: str, schedule: str):
+    now = datetime.today()
+    t = int(datetime.strptime(schedule, '%H:%M').replace(year=now.year, month=now.month, day=now.day).timestamp())
+    i = (t, mission.split(","))
+    print(i)
+    execution_order.put(i)
     exec_table.refresh()
 
 
@@ -211,7 +234,9 @@ def gui():
     time_picker = ui.time(value='12:00', on_change=set_schedule)
 
     # ui.button('Choose file', on_click=pick_file, i/con='folder')
-    file_picker = ui.input("Mission", placeholder="Choose file", value=os.path.join(os.getcwd(), "autowalks"))
+    file_picker = ui.input("Mission", placeholder="Choose file", value="", validation=lambda v: os.path.isdir(
+        f"./autowalks/{v}.walk"))
 
     ui.button("Add to queue", on_click=lambda: add_to_queue(file_picker.value, time_picker.value), icon="plus")
+    queue_runner()
     ui.run()
