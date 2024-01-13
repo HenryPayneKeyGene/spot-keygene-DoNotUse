@@ -1,11 +1,10 @@
-#  Copyright (c) Romir Kulshrestha 2023.
-
 """
 BLK ARC LiDAR Service
 
 This service allows you to control the BLK ARC LiDAR from a remote machine.
 It can also be used during autowalk missions to capture scans.
 """
+#  Copyright (c) Romir Kulshrestha 2023.
 
 import logging
 import sys

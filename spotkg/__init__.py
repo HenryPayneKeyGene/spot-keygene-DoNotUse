@@ -7,6 +7,9 @@ intended to be used with the Spot SDK, and provides a number of useful
 functions for interacting with Spot, as well as services for controlling
 a BLK-ARC LIDAR.
 """
+
+#  Copyright (c) Romir Kulshrestha 2023.
+
 from argparse import Namespace
 
 import importlib_metadata

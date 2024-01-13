@@ -1,11 +1,11 @@
 [project]
 name = "keygene"
-version = "0.2.0"
+version = "0.2.1"
 description = "Code for the KeyGene project at YES!Delft"
 authors = [
     { name = "Romir Kulshrestha", email = "r.kulshrestha@student.tudelft.nl" },
 ]
-license = { text = "MIT License" }
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.7, <3.8"
 classifiers = [

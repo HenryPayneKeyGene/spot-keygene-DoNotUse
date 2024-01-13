@@ -1,53 +1,33 @@
-# Copyright (c) 2023 Boston Dynamics, Inc.  All rights reserved.
-#
-# Downloading, reproducing, distributing or otherwise using the SDK Software
-# is subject to the terms and conditions of the Boston Dynamics Software
-# Development Kit License (20191101-BDSDK-SL).
-
-"""Record Autowalk"""
+#  Copyright (c) Romir Kulshrestha 2023.
 
 import logging
 import os
-import sys
+import threading
 import time
-from argparse import Namespace
 
-import PyQt5.QtCore as QtCore
-import PyQt5.QtWidgets as QtWidgets
-import bosdyn.api.basic_command_pb2 as basic_command_pb2
-import bosdyn.api.mission
-import bosdyn.api.service_customization_pb2 as service_customization
-import bosdyn.client
+import bosdyn.api.robot_state_pb2 as robot_state_proto
 import bosdyn.client.lease
-import bosdyn.client.util
-import bosdyn.geometry as geometry
-import bosdyn.mission.client
-import bosdyn.util
-import numpy as np
-from PyQt5.QtWidgets import QVBoxLayout
-from bosdyn.api import geometry_pb2, image_pb2, world_object_pb2
+from bosdyn import geometry
 from bosdyn.api.autowalk import walks_pb2
-from bosdyn.api.data_acquisition_pb2 import AcquireDataRequest, DataCapture, ImageSourceCapture
-from bosdyn.api.graph_nav import graph_nav_pb2, recording_pb2
-from bosdyn.api.mission import nodes_pb2
-from bosdyn.client import ResponseError, RpcError
-from bosdyn.client.async_tasks import AsyncPeriodicQuery, AsyncTasks
-from bosdyn.client.docking import DockingClient, docking_pb2
-from bosdyn.client.lease import Error as LeaseBaseError, LeaseKeepAlive
-from bosdyn.client.recording import GraphNavRecordingServiceClient
-from bosdyn.client.robot_command import RobotCommandBuilder
-from bosdyn.util import now_sec, seconds_to_timestamp
-from google.protobuf.duration_pb2 import Duration
+from bosdyn.api.graph_nav import recording_pb2, graph_nav_pb2
+from bosdyn.client.estop import EstopClient, EstopEndpoint, EstopKeepAlive
+from bosdyn.client.graph_nav import CannotModifyMapDuringRecordingError
+from bosdyn.client.recording import GraphNavRecordingServiceClient, NotReadyYetError
+from nicegui import ui, app
+from nicegui.elements.slider import Slider
+from nicegui.events import KeyEventArguments
 
-from ..lidar.lidar_service import DIRECTORY_NAME
 from ..spot_client import SpotClient
 
 LOGGER = logging.getLogger()
 
-IMAGE_SOURCES = [
-    'frontright_fisheye_image', 'frontleft_fisheye_image', 'right_fisheye_image',
-    'back_fisheye_image', 'left_fisheye_image'
-]
+VELOCITY_BASE_SPEED = 0.5  # m/s
+VELOCITY_BASE_ANGULAR = 0.8  # rad/sec
+VELOCITY_CMD_DURATION = 0.6  # seconds
+COMMAND_INPUT_RATE = 0.1
+
+IMAGE_SOURCES = ["frontright_fisheye_image", "frontleft_fisheye_image", "right_fisheye_image", "back_fisheye_image",
+                 "left_fisheye_image", ]
 ASYNC_CAPTURE_RATE = 40  # milliseconds, 25 Hz
 LINEAR_VELOCITY_DEFAULT = 0.6  # m/s
 ANGULAR_VELOCITY_DEFAULT = 0.8  # rad/sec
@@ -63,111 +43,36 @@ POSE_INDEX, ROBOT_CAMERA_INDEX, DOCK_INDEX, SCAN_INDEX = range(4)
 INITIAL_PANEL, RECORDED_PANEL, ACTION_PANEL, FINAL_PANEL = range(4)
 
 
-def start_recording(args: Namespace):
-    """Record auto-walks with GUI"""
+class RecorderGUI(object):
+    """A web interface for driving the robot."""
 
-    config = {
-        "name": "Spot Keygene (Record Autowalk)",
-        "addr": str(args.hostname),
-    }
-    spot = SpotClient(config)
-    assert not spot.robot.is_estopped(), 'Robot is estopped. ' \
-                                         'Please use an external E-Stop client, ' \
-                                         'such as the estop SDK example, to configure E-Stop.'
+    spot: SpotClient
+    walk: walks_pb2.Walk
+    directory: str
+    walk_name: str
 
-    app = QtWidgets.QApplication(sys.argv)
-    gui = AutowalkGUI(spot)
-    gui.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
-    gui.show()
-    app.exec_()
+    _recording_client: GraphNavRecordingServiceClient
+    _estop_client: EstopClient
+    _estop_endpoint: EstopEndpoint
 
-    return True
+    linear_velocity: Slider
+    angular_velocity: Slider
 
+    _command_dictionary: dict
 
-def init_robot(hostname):
-    """Initialize robot object"""
-
-    # Initialize SDK
-    sdk = bosdyn.client.create_standard_sdk('RecordAutowalk', [bosdyn.mission.client.MissionClient])
-
-    # Create robot object
-    robot = sdk.create_robot(hostname)
-
-    # Authenticate with robot
-    bosdyn.client.util.authenticate(robot)
-
-    # Establish time sync with the robot
-    robot.time_sync.wait_for_sync()
-
-    return robot
-
-
-class AsyncRobotState(AsyncPeriodicQuery):
-    """Grab robot state."""
-
-    def __init__(self, robot_state_client):
-        super(AsyncRobotState, self).__init__('robot_state', robot_state_client, LOGGER,
-                                              period_sec=0.2)
-
-    def _start_query(self):
-        return self._client.get_robot_state_async()
-
-
-class WindowWidget(QtWidgets.QWidget):
-    """Window class to continuously check for key presses"""
-
-    key_pressed = QtCore.pyqtSignal(str)
-
-    def keyPressEvent(self, key_event):
-        self.key_pressed.emit(key_event.text())
-
-
-class AutowalkGUI(QtWidgets.QMainWindow):
-    """GUI for recording autowalk"""
-    pose_panel_layout: QVBoxLayout
-
-    def __init__(self, robot: SpotClient):
-        super().__init__()
-        self.spot = robot
-        self.robot = self.spot.robot
-
-        self._robot_id = self.robot.get_id()
-        self._lease_keepalive = None
+    def __init__(self, hostname: str):
         self.walk = self._init_walk()
-        self.directory = os.getcwd()
-
-        # Initialize clients
-        self._lease_client = self.spot.lease_client
-        self._power_client = self.spot.power_client
-        self._robot_state_client = self.spot.robot_state_client
-        self._robot_command_client = self.spot.robot_command_client
-        self._graph_nav_client = self.spot.graph_nav_client
-        # Clear graph to ensure only the data recorded using this example gets packaged into map
-        self._graph_nav_client.clear_graph()
-        self._recording_client: GraphNavRecordingServiceClient = self.robot.ensure_client(
-            GraphNavRecordingServiceClient.default_service_name)
-        self._world_object_client = self.spot.world_object_client
-        self._docking_client = self.robot.ensure_client(DockingClient.default_service_name)
-
-        # Initialize async tasks
-        self._robot_state_task = AsyncRobotState(self._robot_state_client)
-        self._async_tasks = AsyncTasks([self._robot_state_task])
-        self._async_tasks.update()
-
-        # Timer for grabbing robot states
-        self.timer = QtCore.QTimer(self)
-        self.timer.setTimerType(QtCore.Qt.PreciseTimer)
-        self.timer.timeout.connect(self._update_tasks)
-        self.timer.start(ASYNC_CAPTURE_RATE)
+        self.directory = os.path.join(os.getcwd(), "autowalks")
+        self.hostname = hostname
 
         # Default starting speed values for the robot
-        self.linear_velocity = LINEAR_VELOCITY_DEFAULT
-        self.angular_velocity = ANGULAR_VELOCITY_DEFAULT
         self.command_duration = COMMAND_DURATION_DEFAULT
 
         # Experimentally determined default starting values for pitch, roll, yaw, and height
         self.euler_angles = geometry.EulerZXY()
         self.robot_height = 0
+
+        self._lock = threading.Lock()
 
         self.resumed_recording = False
         self.elements = []
@@ -175,304 +80,76 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         self.dock = None
         self.dock_and_end_recording = False
 
-        self.command_to_function = {
-            27: self._quit_program,
-            ord('P'): self.spot.toggle_power,
-            ord('v'): self.spot.sit,
-            ord('f'): self.spot.stand,
-            ord('w'): self.spot.move_forward,
-            ord('s'): self.spot.move_backward,
-            ord('a'): self.spot.strafe_left,
-            ord('d'): self.spot.strafe_right,
-            ord('q'): self.spot.turn_left,
-            ord('e'): self.spot.turn_right,
-            ord('L'): self._toggle_lease,
-        }
+        self._locked_messages = ['', '', '']  # string: displayed message for user
+        self._estop_keepalive = None
+        self._exit_check = None
 
-        self.command_descriptions = [
-            '[ESC]  Quit Program', '[P]  Toggle Power', '[L]  Toggle Lease', '[v]  Sit',
-            '[f]  Stand', '[w]  Move Forward', '[s]  Move Backward', '[a]  Strafe Left',
-            '[d]  Strafe Right', '[q]  Turn Left', '[e]  Turn Right'
-        ]
+        # Stuff that is set in start()
+        self._robot_id = None
 
-        self.format_GUI()
+        self.start()
 
-    # noinspection PyUnresolvedReferences
-    def format_GUI(self):
-        """Create and format GUI window"""
+        ui.run(reload=True)  # , native=True, window_size=(835, 460))
 
-        # Main window widget
-        window_widget = WindowWidget()
-        window_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
-        window_widget.key_pressed.connect(self._drive_command)
-        self.window_layout = QtWidgets.QVBoxLayout()
-        window_widget.setLayout(self.window_layout)
-        self.setCentralWidget(window_widget)
+    def connect(self, config):
+        self.spot = SpotClient(config)
 
-        # Add main panels for recording autowalk
-        self.format_top_panel()
-        self.format_left_panel()
-        self.format_right_panel()
+        self.walk_name = self.spot.robot.get_id().nickname + f"_{time.strftime('%Y%m%d_%H%M%S')}"
 
-        content_widget = QtWidgets.QWidget()
-        content_widget_layout = QtWidgets.QHBoxLayout()
-        content_widget.setLayout(content_widget_layout)
-        content_widget_layout.addWidget(self.left_panel_widget)
-        content_widget_layout.addStretch()
-        content_widget_layout.addWidget(self.right_panel_widget)
+        # Initialize clients
+        self._recording_client: GraphNavRecordingServiceClient = self.spot.robot.ensure_client(
+            GraphNavRecordingServiceClient.default_service_name)
 
-        self.window_layout.addWidget(self.top_panel_widget)
-        self.window_layout.addWidget(content_widget)
+        # Clear graph to ensure only the data recorded using this example gets packaged into map
+        try:
+            self.spot.graph_nav_client.clear_graph()
+        except CannotModifyMapDuringRecordingError:
+            self._toggle_record()
 
-        # Signal connections for buttons, sliders, and combo boxes
-        self.action_combobox.activated.connect(self.change_action_panel)
-        self.record_button.clicked.connect(self._toggle_record)
-        self.save_autowalk_button.clicked.connect(self._save_autowalk)
-        self.linear_velocity_slider.valueChanged.connect(self._change_linear_velocity)
-        self.angular_velocity_slider.valueChanged.connect(self._change_angular_velocity)
-        self.command_duration_slider.valueChanged.connect(self._change_command_duration)
-        self.pose_pitch_slider.sliderReleased.connect(self._change_pose)
-        self.pose_roll_slider.sliderReleased.connect(self._change_pose)
-        self.pose_yaw_slider.sliderReleased.connect(self._change_pose)
-        self.pose_height_slider.sliderReleased.connect(self._change_pose)
-        self.pose_duration_slider.valueChanged.connect(self._change_pose_duration)
-        self.rcam_pitch_slider.sliderReleased.connect(self._change_pose)
-        self.rcam_roll_slider.sliderReleased.connect(self._change_pose)
-        self.rcam_yaw_slider.sliderReleased.connect(self._change_pose)
-        self.rcam_height_slider.sliderReleased.connect(self._change_pose)
-        self.save_action_button.clicked.connect(self._save_action)
-        self.cancel_action_button.clicked.connect(self._cancel_action)
-        self.add_action_button.clicked.connect(self._add_action)
-        self.directory_button.clicked.connect(self._choose_directory)
-        self.cancel_autowalk_button.clicked.connect(self._reset_walk)
-        self.docks_list.itemClicked.connect(self.choose_dock)
+        try:
+            self._estop_client = self.spot.robot.ensure_client(EstopClient.default_service_name)
+            self._estop_endpoint = EstopEndpoint(self._estop_client, 'KGRecClient', 9.0)
+        except:
+            # Not the estop.
+            self._estop_client = None
+            self._estop_endpoint = None
 
-        self.setWindowTitle('Record Autowalk')
+        if self._estop_endpoint is not None:
+            self._estop_endpoint.force_simple_setup()  # Set this endpoint as the robot's sole estop.
+        self._command_dictionary = {27: self._stop,  # ESC key
+                                    '\t': self._stop, ord('T'): self.spot.toggle_time_sync,
+                                    ' ': self._toggle_estop,
+                                    'r': self.spot.self_right, ord('P'): self.spot.toggle_power,
+                                    'v': self.spot.sit,
+                                    'f': self.spot.stand, ord('w'): self.spot.move_forward,
+                                    's': self.spot.move_backward,
+                                    'a': self.spot.strafe_left, ord('d'): self.spot.strafe_right,
+                                    'q': self.spot.turn_left,
+                                    'e': self.spot.turn_right, ord('u'): self.spot.unstow,
+                                    'j': self.spot.stow,
+                                    'l': self.spot.toggle_lease,
 
-    # noinspection PyAttributeOutsideInit
-    def format_top_panel(self):
-        self.top_panel_widget = QtWidgets.QWidget()
-        self.top_panel_layout = QtWidgets.QHBoxLayout()
-        self.top_panel_widget.setLayout(self.top_panel_layout)
+                                    # 'vel': self.spot.cmd_vel,
 
-        self.power_label = QtWidgets.QLabel('Powered off', self, alignment=QtCore.Qt.AlignCenter)
-        self.power_label.setStyleSheet('color: red')
-        self.lease_label = QtWidgets.QLabel('Unleased', self, alignment=QtCore.Qt.AlignCenter)
-        self.lease_label.setStyleSheet('color: red')
-        self.directions_label = QtWidgets.QLabel(
-            'Set up and move robot to desired starting position', self)
-        self.directions_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.record_button = QtWidgets.QPushButton('Start Recording', self)
-        self.record_button.setStyleSheet('background-color: green')
+                                    # recording actions
+                                    '1': self._toggle_record, ord('2'): self._save_autowalk, }
+        self.spot.logger.warning("starting recorder ui")
+        self.rec_ui()
 
-        self.top_panel_layout.addWidget(self.lease_label)
-        self.top_panel_layout.addWidget(self.power_label)
-        self.top_panel_layout.addStretch()
-        self.top_panel_layout.addWidget(self.directions_label)
-        self.top_panel_layout.addStretch()
-        self.top_panel_layout.addWidget(self.record_button)
+    def __del__(self):
+        if not hasattr(self, "spot"):
+            return
+        if hasattr(self, "_recording_client"):
+            recording_status = self._recording_client.get_record_status()
 
-    # noinspection PyAttributeOutsideInit
-    def format_left_panel(self):
-        """ Creates left panel widget with available actions, statuses, and speed controls"""
-        self.left_panel_widget = QtWidgets.QWidget()
-        self.left_panel_layout = QtWidgets.QVBoxLayout()
-        self.left_panel_widget.setLayout(self.left_panel_layout)
+            if recording_status.is_recording:
+                self._toggle_record()
 
-        self.actions_label_widget = QtWidgets.QLabel(self)
-        self.actions_label_widget.setText('Robot Commands')
-        self.actions_label_widget.setAlignment(QtCore.Qt.AlignCenter)
-        self.actions_list_widget = QtWidgets.QListWidget(self)
-        for description in self.command_descriptions:
-            QtWidgets.QListWidgetItem(description, self.actions_list_widget)
+        self.shutdown()
 
-        self.linear_velocity_label = QtWidgets.QLabel(f'Speed: {self.linear_velocity:.2f} m/s',
-                                                      self)
-        self.angular_velocity_label = QtWidgets.QLabel(
-            f'Turning speed: {self.angular_velocity:.2f} rad/s', self)
-        self.command_duration_label = QtWidgets.QLabel(
-            f'Sensitivity: {self.command_duration:.2f} s', self)
-        self.linear_velocity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.linear_velocity_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.angular_velocity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.angular_velocity_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.command_duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.command_duration_slider.setValue(SLIDER_MIDDLE_VALUE)
-
-        self.left_panel_layout.addWidget(self.actions_label_widget)
-        self.left_panel_layout.addWidget(self.actions_list_widget)
-        self.left_panel_layout.addWidget(self.linear_velocity_label)
-        self.left_panel_layout.addWidget(self.linear_velocity_slider)
-        self.left_panel_layout.addWidget(self.angular_velocity_label)
-        self.left_panel_layout.addWidget(self.angular_velocity_slider)
-        self.left_panel_layout.addWidget(self.command_duration_label)
-        self.left_panel_layout.addWidget(self.command_duration_slider)
-
-    # noinspection PyAttributeOutsideInit
-    def format_right_panel(self):
-        """Creates right panel with autowalk actions and save menu"""
-        self.right_panel_widget = QtWidgets.QWidget()
-        self.right_panel_layout = QtWidgets.QVBoxLayout()
-        self.right_panel_widget.setLayout(self.right_panel_layout)
-        self.right_panel_stacked_widget = QtWidgets.QStackedWidget()
-
-        # Initial panel with welcome message
-        self.initial_panel = QtWidgets.QWidget()
-        self.initial_panel_layout = QtWidgets.QVBoxLayout()
-        self.initial_panel.setLayout(self.initial_panel_layout)
-        self.welcome_message = QtWidgets.QLabel(
-            '''Welcome to the Record Autowalk GUI.\n\nMake sure to remove the E-Stop, acquire a lease, and power on 
-            the robot.\n\nPosition the robot with a fiducial in view before starting the recording.''',
-            self)
-        self.welcome_message.setAlignment(QtCore.Qt.AlignTop)
-        self.welcome_message.setWordWrap(True)
-        self.initial_panel_layout.addWidget(self.welcome_message)
-
-        # Panel with summary of recorded actions
-        self.recorded_panel = QtWidgets.QWidget()
-        self.recorded_panel_layout = QtWidgets.QVBoxLayout()
-        self.recorded_panel.setLayout(self.recorded_panel_layout)
-        self.recorded_label = QtWidgets.QLabel('Currently Saved Actions', self)
-        self.recorded_list = QtWidgets.QListWidget(self)
-        self.add_action_button = QtWidgets.QPushButton('Add Action', self)
-        self.recorded_panel_layout.addWidget(self.recorded_label)
-        self.recorded_panel_layout.addWidget(self.recorded_list)
-        self.recorded_panel_layout.addWidget(self.add_action_button)
-
-        # Action Panels
-        self.action_panel = QtWidgets.QWidget()
-        self.action_panel_layout = QtWidgets.QVBoxLayout()
-        self.action_panel.setLayout(self.action_panel_layout)
-
-        self.action_combobox = QtWidgets.QComboBox(self)
-        self.action_combobox.addItems(['Pose', 'Robot Camera', 'Dock and End Recording', 'Scan'])
-
-        self.format_pose_panel()
-
-        self.format_rcam_panel()
-
-        self.format_docking_panel()
-
-        # Stacking Panels
-        self.stack_widget = QtWidgets.QStackedWidget()
-        self.stack_widget.addWidget(self.pose_panel)
-        self.stack_widget.addWidget(self.rcam_panel)
-        self.stack_widget.addWidget(self.docking_panel)
-
-        self.save_action_button = QtWidgets.QPushButton('Save Action', self)
-        self.cancel_action_button = QtWidgets.QPushButton('Cancel Action', self)
-
-        self.action_panel_layout.addWidget(self.action_combobox)
-        self.action_panel_layout.addWidget(self.stack_widget)
-        self.action_panel_layout.addWidget(self.save_action_button)
-        self.action_panel_layout.addWidget(self.cancel_action_button)
-
-        # Final Panel
-        self.final_panel = QtWidgets.QWidget()
-        self.final_panel_layout = QtWidgets.QVBoxLayout()
-        self.final_panel.setLayout(self.final_panel_layout)
-
-        self.autowalk_name_label = QtWidgets.QLabel('Autowalk Name:', self)
-        self.autowalk_name_line = QtWidgets.QLineEdit()
-        self.directory_button = QtWidgets.QPushButton('Choose Directory', self)
-        self.save_autowalk_button = QtWidgets.QPushButton('Save Autowalk', self)
-        self.cancel_autowalk_button = QtWidgets.QPushButton('Cancel', self)
-        self.final_panel_layout.addWidget(self.autowalk_name_label)
-        self.final_panel_layout.addWidget(self.autowalk_name_line)
-        self.final_panel_layout.addWidget(self.directory_button)
-        self.final_panel_layout.addStretch()
-        self.final_panel_layout.addWidget(self.save_autowalk_button)
-        self.final_panel_layout.addWidget(self.cancel_autowalk_button)
-
-        self.right_panel_stacked_widget.addWidget(self.initial_panel)
-        self.right_panel_stacked_widget.addWidget(self.recorded_panel)
-        self.right_panel_stacked_widget.addWidget(self.action_panel)
-        self.right_panel_stacked_widget.addWidget(self.final_panel)
-
-        self.right_panel_layout.addWidget(self.right_panel_stacked_widget)
-
-    # noinspection PyAttributeOutsideInit
-    def format_pose_panel(self):
-        """Creates pose panel for widgets associated with creating pose action"""
-        self.pose_panel = QtWidgets.QWidget()
-        self.pose_panel_layout = QtWidgets.QVBoxLayout()
-        self.pose_panel.setLayout(self.pose_panel_layout)
-
-        self.pose_name_label = QtWidgets.QLabel('Pose Name', self)
-        self.pose_name_line = QtWidgets.QLineEdit()
-        self.pose_pitch_label = QtWidgets.QLabel('Pitch', self)
-        self.pose_pitch_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.pose_pitch_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.pose_roll_label = QtWidgets.QLabel('Roll', self)
-        self.pose_roll_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.pose_roll_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.pose_yaw_label = QtWidgets.QLabel('Yaw', self)
-        self.pose_yaw_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.pose_yaw_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.pose_height_label = QtWidgets.QLabel('Height', self)
-        self.pose_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.pose_height_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.pose_duration_label = QtWidgets.QLabel('Pose Duration: 5 s', self)
-        self.pose_duration_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.pose_duration_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.pose_panel_layout.addWidget(self.pose_name_label)
-        self.pose_panel_layout.addWidget(self.pose_name_line)
-        self.pose_panel_layout.addWidget(self.pose_pitch_label)
-        self.pose_panel_layout.addWidget(self.pose_pitch_slider)
-        self.pose_panel_layout.addWidget(self.pose_roll_label)
-        self.pose_panel_layout.addWidget(self.pose_roll_slider)
-        self.pose_panel_layout.addWidget(self.pose_yaw_label)
-        self.pose_panel_layout.addWidget(self.pose_yaw_slider)
-        self.pose_panel_layout.addWidget(self.pose_height_label)
-        self.pose_panel_layout.addWidget(self.pose_height_slider)
-        self.pose_panel_layout.addWidget(self.pose_duration_label)
-        self.pose_panel_layout.addWidget(self.pose_duration_slider)
-        self.pose_panel_layout.addStretch()
-
-    # noinspection PyAttributeOutsideInit
-    def format_rcam_panel(self):
-        """Creates robot camera panel for widgets associated with creating a robot camera action"""
-        self.rcam_panel = QtWidgets.QWidget()
-        self.rcam_layout = QtWidgets.QVBoxLayout()
-        self.rcam_panel.setLayout(self.rcam_layout)
-
-        self.rcam_label = QtWidgets.QLabel(self)
-        self.rcam_label.setText('Picture name:')
-        self.rcam_line = QtWidgets.QLineEdit()
-        self.rcam_pitch_label = QtWidgets.QLabel('Pitch', self)
-        self.rcam_pitch_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.rcam_pitch_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.rcam_roll_label = QtWidgets.QLabel('Roll', self)
-        self.rcam_roll_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.rcam_roll_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.rcam_yaw_label = QtWidgets.QLabel('Yaw', self)
-        self.rcam_yaw_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.rcam_yaw_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.rcam_height_label = QtWidgets.QLabel('Height', self)
-        self.rcam_height_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
-        self.rcam_height_slider.setValue(SLIDER_MIDDLE_VALUE)
-        self.rcam_layout.addWidget(self.rcam_label)
-        self.rcam_layout.addWidget(self.rcam_line)
-        self.rcam_layout.addWidget(self.rcam_pitch_label)
-        self.rcam_layout.addWidget(self.rcam_pitch_slider)
-        self.rcam_layout.addWidget(self.rcam_roll_label)
-        self.rcam_layout.addWidget(self.rcam_roll_slider)
-        self.rcam_layout.addWidget(self.rcam_yaw_label)
-        self.rcam_layout.addWidget(self.rcam_yaw_slider)
-        self.rcam_layout.addWidget(self.rcam_height_label)
-        self.rcam_layout.addWidget(self.rcam_height_slider)
-        self.rcam_layout.addStretch()
-
-    # noinspection PyAttributeOutsideInit
-    def format_docking_panel(self):
-        """Creates docking panel for widgets associated with creating a docking action"""
-        self.docking_panel = QtWidgets.QWidget()
-        self.docking_layout = QtWidgets.QVBoxLayout()
-        self.docking_panel.setLayout(self.docking_layout)
-
-        self.docks_list = QtWidgets.QListWidget(self)
-        self.docking_layout.addWidget(self.docks_list)
-        self.docking_layout.addStretch()
+    def _stop(self):
+        self.shutdown()
+        app.shutdown()
 
     @staticmethod
     def _init_walk():
@@ -483,13 +160,14 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         walk.playback_mode.once.SetInParent()
         return walk
 
-    def _update_tasks(self):
-        """Updates asynchronous robot state captures"""
-        self._async_tasks.update()
+    @property
+    def robot_state(self):
+        """Get latest robot state proto."""
+        return self.spot.robot_state
 
-    def _create_element(self, name, waypoint, is_action=True) -> walks_pb2.Element:
+    @staticmethod
+    def _create_element(name, waypoint, is_action=True) -> walks_pb2.Element:
         """Creates default autowalk Element object, populating everything except Action and ActionWrapper"""
-        QtWidgets.QListWidgetItem(name, self.recorded_list)
         element: walks_pb2.Element = walks_pb2.Element()
         element.name = name
         element.target.navigate_to.destination_waypoint_id = waypoint.id
@@ -508,286 +186,17 @@ class AutowalkGUI(QtWidgets.QMainWindow):
         element.battery_monitor.battery_stop_threshold = BATTERY_THRESHOLDS[1]
         return element
 
-    def _save_action(self):
-        """Save autowalk action by modifying walk object"""
-        # Create waypoint at action location
-        waypoint_response = self._recording_client.create_waypoint()
-
-        element = walks_pb2.Element()
-        if self.action_combobox.currentIndex() == POSE_INDEX:
-            element = self._create_element(self.pose_name_line.text().strip(),
-                                           waypoint_response.created_waypoint)
-            element.action.sleep.duration.seconds = int(
-                self.pose_duration_slider.value() / 10)  # Creates range of 0-9 seconds
-            element.action_wrapper.robot_body_pose.target_tform_body.position.SetInParent()
-            element.action_wrapper.robot_body_pose.target_tform_body.rotation.CopyFrom(
-                self.euler_angles.to_quaternion())
-            position = geometry_pb2.Vec3()
-            position.z = self.robot_height
-            element.action_wrapper.robot_body_pose.target_tform_body.position.CopyFrom(position)
-
-        elif self.action_combobox.currentIndex() == ROBOT_CAMERA_INDEX:
-            action_name = self.rcam_line.text().strip()
-            element = self._create_element(action_name, waypoint_response.created_waypoint)
-            daq = AcquireDataRequest()
-            daq.action_id.action_name = action_name
-            for img_source in IMAGE_SOURCES:
-                img_request = ImageSourceCapture()
-                img_request.image_service = 'image'
-                img_request.image_source = img_source
-                img_request.pixel_format = image_pb2.Image.PIXEL_FORMAT_GREYSCALE_U8
-                daq.acquisition_requests.image_captures.append(img_request)
-
-            data_capture_types = [
-                'robot-id', 'robot-state', 'detected-objects', 'detailed-position-data',
-                'basic-position-data'
-            ]
-            for data_type in data_capture_types:
-                data_request = DataCapture()
-                data_request.name = data_type
-                daq.acquisition_requests.data_captures.append(data_request)
-            element.action.data_acquisition.acquire_data_request.CopyFrom(daq)
-            element.action.data_acquisition.completion_behavior = nodes_pb2.DataAcquisition.COMPLETE_AFTER_SAVED
-
-            element.action_wrapper.robot_body_pose.target_tform_body.position.SetInParent()
-            element.action_wrapper.robot_body_pose.target_tform_body.rotation.CopyFrom(
-                self.euler_angles.to_quaternion())
-            position = geometry_pb2.Vec3()
-            position.z = self.robot_height
-            element.action_wrapper.robot_body_pose.target_tform_body.position.CopyFrom(position)
-
-        elif self.action_combobox.currentIndex() == DOCK_INDEX:
-            if not self.dock:
-                return
-            end_dock = walks_pb2.Dock()
-            end_dock.dock_id = self.dock
-
-            # Create waypoint at prep pose before docking
-            dock_prep_waypoint = self._recording_client.create_waypoint()
-            dock_target = walks_pb2.Target()
-            dock_target.navigate_to.destination_waypoint_id = dock_prep_waypoint.created_waypoint.id
-            dock_target.navigate_to.travel_params.max_distance = TRAVEL_MAX_DIST
-            dock_target.navigate_to.travel_params.feature_quality_tolerance = (
-                graph_nav_pb2.TravelParams.FeatureQualityTolerance.TOLERANCE_IGNORE_POOR_FEATURE_QUALITY)
-            dock_target.navigate_to.travel_params.blocked_path_wait_time.seconds = BLOCKED_PATH_WAIT_TIME
-            end_dock.target_prep_pose.CopyFrom(dock_target)
-
-            # Try to dock the robot
-            timeout = 30
-            converter = self.robot.time_sync.get_robot_time_converter()
-            start_time = converter.robot_seconds_from_local_seconds(now_sec())
-            cmd_end_time = start_time + timeout
-
-            self._docking_client.docking_command_full(
-                self.dock, self.robot.time_sync.endpoint.clock_identifier,
-                seconds_to_timestamp(cmd_end_time), docking_pb2.PREP_POSE_SKIP_POSE)
-
-            # Create last waypoint on top of dock
-            dock_waypoint = self._recording_client.create_waypoint()
-            end_dock.docked_waypoint_id = dock_waypoint.created_waypoint.id
-            end_dock.prompt_duration.seconds = PROMPT_DURATION_DOCK
-            self.walk.docks.append(end_dock)
-
-            self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
-            self.dock_and_end_recording = True
-            QtWidgets.QListWidgetItem('Dock and Finish', self.recorded_list)
-            return
-        elif self.action_combobox.currentIndex() == SCAN_INDEX:
-            scan_element = self._create_element('Scan', waypoint_response.created_waypoint)
-            self._scan_action(scan_element.action)
-
-            sleep_element = self._create_element('Sleep', waypoint_response.created_waypoint)
-            sleep_element.action.sleep.duration.seconds = 30
-
-            stop_element = self._create_element('Stop Scan', waypoint_response.created_waypoint)
-            self._stop_scan_action(stop_element.action)
-
-            self.elements.append(scan_element)
-            self.elements.append(sleep_element)
-            self.elements.append(stop_element)
-            self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
-            return
-
-        self.elements.append(element)
-        self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
-
-    @staticmethod
-    def _scan_action(action):
-        action.service_name = DIRECTORY_NAME
-
-        params = service_customization.DictParam.Spec()
-        child_spec = service_customization.DictParam.ChildSpec()
-        action_param = service_customization.CustomParam.Spec()
-        action_param.string_spec = service_customization.StringParam.Spec()
-        child_spec.spec = action_param
-        params.specs['action'] = child_spec
-        action.parameters.spec.CopyFrom(params)
-
-        values = service_customization.DictParam()
-        values.values['action'] = 'capture'
-        action.parameters.values.CopyFrom(values)
-
-        action.rpc_timeout.CopyFrom(Duration(seconds=10))
-
-    def _stop_scan_action(self, action):
-        action.service_name = DIRECTORY_NAME
-
-        params = service_customization.DictParam.Spec()
-        child_spec = service_customization.DictParam.ChildSpec()
-        action_param = service_customization.CustomParam.Spec()
-        action_param.string_spec = service_customization.StringParam.Spec()
-        child_spec.spec = action_param
-        params.specs['action'] = child_spec
-        action.parameters.spec.CopyFrom(params)
-
-        values = service_customization.DictParam()
-        values.values['action'] = 'stop-capture'
-        action.parameters.values.CopyFrom(values)
-
-        action.rpc_timeout.CopyFrom(Duration(seconds=10))
-
-    def _save_autowalk(self):
-        """Save autowalk in directory"""
-        if not self.dock_and_end_recording:
-            # Creates end waypoint and action if the last action is not docking
-            self._toggle_record()
-            waypoint_response = self._recording_client.create_waypoint()
-            end_element = self._create_element('End Recording', waypoint_response.created_waypoint,
-                                               is_action=False)
-            self.elements.append(end_element)
-            self._toggle_record()
-
-        walk_name = self.autowalk_name_line.text().strip()
-        self.walk.mission_name = walk_name
-
-        # Creates walk directory and saves autowalk in format
-        walk_directory = os.path.join(self.directory, f'{walk_name}.walk')
-        directory_copy_number = 0
-        while os.path.isdir(walk_directory):
-            # Appends (number) to folder name if folder with existing name exists
-            directory_copy_number += 1
-            walk_directory = os.path.join(self.directory,
-                                          walk_name + f'{walk_name}({directory_copy_number}).walk')
-        self._graph_nav_client.write_graph_and_snapshots(walk_directory)
-        self.walk.elements.extend(self.elements)
-        mission_directory = os.path.join(walk_directory, 'missions')
-        os.mkdir(mission_directory)
-        with open(os.path.join(mission_directory, 'autogenerated.walk'), 'wb') as autowalk_file:
-            autowalk_file.write(self.walk.SerializeToString())
-
-        self._reset_walk()
-
-    def _reset_walk(self):
-        """Resets walk parameters and GUI"""
-        self.right_panel_stacked_widget.setCurrentIndex(INITIAL_PANEL)
-        self.walk = self._init_walk()
-        self.directions_label.setText('Set up and move robot to desired starting position')
-        self.record_button.setText('Start Recording')
-        self.recorded_list.clear()
-        self.resumed_recording = False
-        self.dock_and_end_recording = False
-        self._graph_nav_client.clear_graph()
-
-    def _drive_command(self, key):
-        """Maps keyboard input to robot commands"""
-        if key and ord(key) in self.command_to_function:
-            cmd_function = self.command_to_function[ord(key)]
-            cmd_function()
-
-    def change_action_panel(self, index):
-        """Looks for fiducials before opening docking panel"""
-        self.stack_widget.setCurrentIndex(index)
-        if index == DOCK_INDEX:
-            # Get all fiducial objects (an object of a specific type).
-            self.docks_list.clear()
-            request_fiducials = [world_object_pb2.WORLD_OBJECT_DOCK]
-            self.fiducial_objects = self._world_object_client.list_world_objects(
-                object_type=request_fiducials).world_objects
-            for fiducial in self.fiducial_objects:
-                QtWidgets.QListWidgetItem(str(fiducial.dock_properties.dock_id), self.docks_list)
-
-    def choose_dock(self, item):
-        """Initializes dock selection"""
-        self.dock = int(item.text())
-
-    def _change_pose(self):
-        if self.stack_widget.currentIndex() == POSE_INDEX:
-            pitch = np.radians(self.pose_pitch_slider.value() - SLIDER_MIDDLE_VALUE)
-            roll = np.radians(self.pose_roll_slider.value() - SLIDER_MIDDLE_VALUE)
-            yaw = np.radians(self.pose_yaw_slider.value() - SLIDER_MIDDLE_VALUE)
-            self.robot_height = (
-                                        self.pose_height_slider.value() - SLIDER_MIDDLE_VALUE
-                                ) * 0.003 - 0.15  # Maps to range (-0.15,0.15) meters from normal height
-        else:
-            pitch = np.radians(self.rcam_pitch_slider.value() - SLIDER_MIDDLE_VALUE)
-            roll = np.radians(self.rcam_roll_slider.value() - SLIDER_MIDDLE_VALUE)
-            yaw = np.radians(self.rcam_yaw_slider.value() - SLIDER_MIDDLE_VALUE)
-            self.robot_height = (
-                                        self.rcam_height_slider.value() - SLIDER_MIDDLE_VALUE
-                                ) * 0.003 - 0.15  # Maps to range (-0.15,0.15) meters from normal height
-        self.euler_angles = geometry.EulerZXY(yaw=yaw, roll=roll, pitch=pitch)
-        self._pose_command()
-
-    def _change_pose_duration(self):
-        val = int(
-            self.pose_duration_slider.value() / 10)  # Creates a range between 0 and 10 seconds
-        self.pose_duration_label.setText(f'Pose Duration: {val} s')
-
-    def _change_linear_velocity(self, value):
-        self.linear_velocity = value / 100  # Creates a range between 0 and 1 m/s
-        self.linear_velocity_label.setText(f'Speed: {self.linear_velocity:.2f} m/s')
-
-    def _change_angular_velocity(self, value):
-        self.angular_velocity = value / 100  # Creates a range between 0 and 1 rad/s
-        self.angular_velocity_label.setText(f'Turning speed: {self.angular_velocity:.2f} rad/s')
-
-    def _change_command_duration(self, value):
-        self.command_duration = value / 100  # Creates a range between 0 and 1 seconds
-        self.command_duration_label.setText(f'Sensitivity: {self.command_duration:.2f} s')
-
-    @property
-    def robot_state(self):
-        """Get latest robot state proto."""
-        return self._robot_state_task.proto
-
-    @staticmethod
-    def _try_grpc(desc, thunk):
-        try:
-            return thunk()
-        except (ResponseError, RpcError, LeaseBaseError) as err:
-            print(f'Failed {desc}: {err}')
-            return None
-
-    @staticmethod
-    def _try_grpc_async(desc, thunk):
-
-        def on_future_done(fut):
-            try:
-                fut.result()
-            except (ResponseError, RpcError, LeaseBaseError) as err:
-                print(f'Failed {desc}: {err}')
-                return None
-
-        future = thunk()
-        future.add_done_callback(on_future_done)
-
-    def _choose_directory(self):
-        """Opens directory selection dialog"""
-        self.directory = str(QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Directory'))
-
-    def _add_action(self):
-        """Opens action selection panel"""
-        self.right_panel_stacked_widget.setCurrentIndex(ACTION_PANEL)
-
-    def _cancel_action(self):
-        """Goes back to action summary panel"""
-        self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
-
-    def _quit_program(self):
-        """Settles robot before exiting"""
-        if self._lease_keepalive:
-            self._lease_keepalive.shutdown()
-        self.close()
+    def _toggle_estop(self):
+        """toggle estop on/off. Initial state is ON"""
+        if self._estop_client is not None and self._estop_endpoint is not None:
+            if not self._estop_keepalive:
+                self._estop_keepalive = EstopKeepAlive(self._estop_endpoint)
+                ui.notify('Estop deactivated.')
+            else:
+                self.spot.try_grpc('stopping estop', self._estop_keepalive.stop)
+                self._estop_keepalive.shutdown()
+                self._estop_keepalive = None
+                ui.notify('Estop activated.')
 
     def _toggle_record(self):
         """toggle recording on/off. Initial state is OFF"""
@@ -796,21 +205,21 @@ class AutowalkGUI(QtWidgets.QMainWindow):
 
             if not recording_status.is_recording:
                 # Start recording map
+                if not self.resumed_recording and not len(self.spot.get_visible_fiducials()):
+                    ui.notify('No fiducials visible. Recording will not start until fiducials are visible.')
+                    return False
                 start_recording_response = self._recording_client.start_recording_full()
                 if start_recording_response.status != recording_pb2.StartRecordingResponse.STATUS_OK:
-                    print(f'Error starting recording (status = {start_recording_response.status}).')
+                    ui.notify(f'Error starting recording (status = {start_recording_response.status}).')
                     return False
                 else:
-                    self.record_button.setText('Stop Recording')
-                    self.record_button.setStyleSheet('background-color: red')
-                    self.right_panel_stacked_widget.setCurrentIndex(RECORDED_PANEL)
-                    self.directions_label.setText('Create and record actions for Autowalk')
+                    # self.strings.rec = 'Stop Recording'
                     if not self.resumed_recording:
                         del self.walk.elements[:]
                         start_element = self._create_element(
                             'Start', start_recording_response.created_waypoint, is_action=False)
                         self.elements.append(start_element)
-
+                ui.notify('Recording started.')
             else:
                 # Stop recording map
                 while True:
@@ -819,56 +228,284 @@ class AutowalkGUI(QtWidgets.QMainWindow):
                         stop_status = self._recording_client.stop_recording()
                         if stop_status != recording_pb2.StopRecordingResponse.STATUS_NOT_READY_YET:
                             break
-                    except bosdyn.client.recording.NotReadyYetError:
+                    except NotReadyYetError:
                         time.sleep(0.1)
 
                 if stop_status != recording_pb2.StopRecordingResponse.STATUS_OK:
-                    print(f'Error stopping recording (status = {stop_status}).')
+                    ui.notify(f'Error stopping recording (status = {stop_status}).')
                     return False
 
                 self.resumed_recording = True
-                self.record_button.setText('Resume Recording')
-                self.record_button.setStyleSheet('background-color: orange')
-                self.right_panel_stacked_widget.setCurrentIndex(FINAL_PANEL)
-                self.directions_label.setText('Review and save Autowalk')
+                ui.notify('Recording stopped.')
+                # self.strings.rec = 'Resume Recording'
 
-    def _toggle_lease(self):
-        """toggle lease acquisition. Initial state is acquired"""
-        if self._lease_client is not None:
-            if self._lease_keepalive is None:
-                self._lease_keepalive = LeaseKeepAlive(self._lease_client, must_acquire=True,
-                                                       return_at_exit=True)
-                self.lease_label.setText('Leased')
-                self.lease_label.setStyleSheet('color: green')
+    def _save_autowalk(self):
+        """Save autowalk in directory"""
+
+        self.directory = self.dir_text.value
+        self.walk_name = self.walk_text.value
+        self.walk.mission_name = self.walk_name
+        ui.notify(f"Saving to {self.walk_name}.walk...")
+
+        if not self.dock_and_end_recording:
+            # Creates end waypoint and action if the last action is not docking
+            self._toggle_record()
+            waypoint_response = self._recording_client.create_waypoint()
+            end_element = self._create_element('End Recording', waypoint_response.created_waypoint, is_action=False)
+            self.elements.append(end_element)
+            self._toggle_record()
+
+        # Creates walk directory and saves autowalk in format
+        walk_directory = os.path.join(self.directory, f'{self.walk_name}.walk')
+        directory_copy_number = 0
+        while os.path.isdir(walk_directory):
+            # Appends (number) to folder name if folder with existing name exists
+            directory_copy_number += 1
+            walk_directory = os.path.join(self.directory, f'{self.walk_name}({directory_copy_number}).walk')
+        self.spot.graph_nav_client.write_graph_and_snapshots(walk_directory)
+        self.walk.elements.extend(self.elements)
+        mission_directory = os.path.join(walk_directory, 'missions')
+        os.mkdir(mission_directory)
+        with open(os.path.join(mission_directory, 'autogenerated.walk'), 'wb') as autowalk_file:
+            autowalk_file.write(self.walk.SerializeToString())
+
+        self._reset_walk()
+        ui.notify("Saved recording.")
+
+    def _reset_walk(self):
+        """Resets walk parameters and GUI"""
+        self.walk = self._init_walk()
+        # self.strings.rec = 'Start Recording'
+        self.resumed_recording = False
+        self.dock_and_end_recording = False
+        self.spot.graph_nav_client.clear_graph()
+
+    def start(self):
+        """Begin communication with the robot."""
+        # Construct our lease keep-alive object, which begins RetainLease calls in a thread.
+        # self._lease_keepalive = LeaseKeepAlive(self._lease_client, must_acquire=True,
+        #                                        return_at_exit=True)
+
+        self.connect({"name": "KGRecorder", "addr": self.hostname})
+
+        def keybinds(e: KeyEventArguments):
+            # self.spot.logger.warning(f"keybinds: {e.key.name}")
+            if not e.action.keydown:
+                return
+            if e.modifiers.ctrl:
+                if e.key == 'c':
+                    self._stop()
+                elif e.key == 'x':
+                    self._toggle_estop()
+                elif e.key == 'r':
+                    self._toggle_record()
+                elif e.key == 's':
+                    self._save_autowalk()
+                return
+            elif e.modifiers.shift:
+                if e.key == 'P':
+                    self.spot.toggle_power()
+                return
+            k = e.key.name
+            if k in self._command_dictionary:
+                self._command_dictionary[k]()
+
+        ui.keyboard(on_key=keybinds)
+
+    def shutdown(self):
+        """Release control of robot as gracefully as possible."""
+        LOGGER.info('Shutting down.')
+        if self._estop_keepalive:
+            # This stops the check-in thread but does not stop the robot.
+            self._estop_keepalive.shutdown()
+        del self.spot
+
+    def _lease_str(self):
+        if self.spot.lease_keep_alive is None:
+            alive = 'STOPPED'
+            lease = 'RETURNED'
+        else:
+            lease_keep_alive = self.spot.lease_keep_alive
+            try:
+                _lease = lease_keep_alive.lease_wallet.get_lease()
+                lease = f'{_lease.lease_proto.resource}:{_lease.lease_proto.sequence}'
+            except bosdyn.client.lease.Error:
+                lease = '...'
+            if lease_keep_alive.is_alive():
+                alive = 'RUNNING'
             else:
-                self._lease_keepalive.shutdown()
-                self._lease_keepalive = None
-                self.lease_label.setText('Unleased')
-                self.lease_label.setStyleSheet('color: red')
+                alive = 'STOPPED'
+        return f'Lease {lease} THREAD:{alive}'
 
-    def battery_change_pose(self):
-        self._start_robot_command(
-            'battery_change_pose',
-            RobotCommandBuilder.battery_change_pose_command(
-                dir_hint=basic_command_pb2.BatteryChangePoseCommand.Request.HINT_RIGHT))
+    def _power_state_str(self):
+        power_state = self.robot_state.power_state.motor_power_state
+        if power_state is None:
+            return ''
+        state_str = robot_state_proto.PowerState.MotorPowerState.Name(power_state)
+        return f'Power: {state_str[6:]}'  # get rid of STATE_ prefix
 
-    def _pose_command(self):
-        self._start_robot_command(
-            '',
-            RobotCommandBuilder.synchro_trajectory_command_in_body_frame(
-                0, 0, 0, self.robot.get_frame_tree_snapshot(),
-                params=RobotCommandBuilder.mobility_params(body_height=self.robot_height,
-                                                           footprint_R_body=self.euler_angles),
-                body_height=self.robot_height), end_time_secs=time.time() + 1)
+    def _estop_str(self):
+        if not self._estop_client:
+            thread_status = 'NOT ESTOP'
+        else:
+            thread_status = 'RUNNING' if self._estop_keepalive else 'STOPPED'
+        estop_status = '??'
+        state = self.robot_state
+        if state:
+            for estop_state in state.estop_states:
+                if estop_state.type == estop_state.TYPE_SOFTWARE:
+                    estop_status = estop_state.State.Name(estop_state.state)[6:]  # s/STATE_//
+                    break
+        return f'Estop {estop_status} (thread: {thread_status})'
 
-    # Robot command implementations
-    def _start_robot_command(self, desc, command_proto, end_time_secs=None):
+    def _battery_str(self):
+        if not self.robot_state:
+            return ''
+        battery_state = self.robot_state.battery_states[0]
+        status = battery_state.Status.Name(battery_state.status)
+        status = status[7:]  # get rid of STATUS_ prefix
+        if battery_state.charge_percentage.value:
+            bar_len = int(battery_state.charge_percentage.value) // 10
+            bat_bar = f'|{"=" * bar_len}{" " * (10 - bar_len)}|'
+        else:
+            bat_bar = ''
+        time_left = ''
 
-        def _start_command():
-            self._robot_command_client.robot_command(command=command_proto,
-                                                     end_time_secs=end_time_secs)
+        def secs_to_hms(seconds):
+            """Format a time in seconds as 'H:MM:SS'
 
-        self._try_grpc(desc, _start_command)
+            Args:
+             seconds:   number of seconds (will be truncated to integer value)
+            """
+            isecs = int(seconds)
+            seconds = isecs % 60
+            minutes = (isecs // 60) % 60
+            hours = isecs // 3600
+            return '{:d}:{:02d}:{:02d}'.format(hours, minutes, seconds)
 
-    def _self_right(self):
-        self._start_robot_command('self_right', RobotCommandBuilder.selfright_command())
+        if battery_state.estimated_runtime:
+            time_left = f'({secs_to_hms(battery_state.estimated_runtime.seconds)})'
+        return f'Battery: {status}{bat_bar} {time_left}'
+
+    def connect_ui(self):
+        with ui.card() as card:
+            namebox = ui.input('Name', value="spot")
+            addrbox = ui.input('Address', value="192.168.80.3")
+            btn = ui.button('Connect')
+
+            def on_connect():
+                namebox.disable()
+                addrbox.disable()
+                btn.disable()
+                ui.open(self.connect({"name": namebox.value, "addr": addrbox.value}))
+
+            btn.on("click", on_connect)
+
+    def update_strings(self):
+        self.lease_label.set_text(self._lease_str())
+        self.power_label.set_text(self._power_state_str())
+        self.estop_label.set_text(self._estop_str())
+        self.battery_label.set_text(self._battery_str())
+
+        self.power_btn.set_text("Power" if self._power_state_str()[7:] == "OFF" else "Power Off")
+
+        if self.spot.lease_keep_alive is not None and self.spot.lease_keep_alive.is_alive():
+            self.lease_btn.set_text("Release")
+            if self._power_state_str()[7:] == "OFF":
+                self.power_btn.enable()
+                self.power_btn.set_text("Power")
+            else:
+                self.power_btn.set_text("Power Off")
+        else:
+            self.lease_btn.set_text("Lease")
+            self.power_btn.disable()
+            self.power_btn.set_text("Power")
+
+        if self.power_btn.text == "Power":
+            self.joy.active = False
+            self.sit_btn.disable()
+            self.unstow_btn.disable()
+            self.stand_btn.disable()
+            self.stow_btn.disable()
+        else:
+            self.joy.active = True
+            self.sit_btn.enable()
+            self.unstow_btn.enable()
+            self.stand_btn.enable()
+            self.stow_btn.enable()
+
+        if not self._recording_client.get_record_status().is_recording:
+            self.rec_btn.set_text("Record")
+            if not self.resumed_recording:
+                self.save_btn.disable()
+                if not len(self.spot.get_visible_fiducials()):
+                    self.rec_btn.disable()
+                else:
+                    self.rec_btn.enable()
+            else:
+                self.save_btn.enable()
+        else:
+
+            self.rec_btn.set_text("Stop Rec")
+            self.save_btn.disable()
+
+    def rec_ui(self):
+        cmd_vel = self.spot.cmd_vel
+        ui.dark_mode(True)
+
+        with ui.row().classes('items-stretch'):
+            with ui.card().classes('w-44 text-center items-center'):
+                ui.label('Control').classes('text-2xl')
+                self.joy = ui.joystick(color='blue', size=50,
+                                       on_move=lambda e: cmd_vel(float(e.y) * LINEAR_VELOCITY_DEFAULT,
+                                                                 float(-e.x) * ANGULAR_VELOCITY_DEFAULT),
+                                       on_end=lambda _: cmd_vel(0.0, 0.0))
+                ui.label('Publish steering commands by dragging your mouse around in the blue field').classes(
+                    'mt-6')
+            with ui.card().classes('w-50 text-center items-center'):
+                # ui.label('Data').classes('text-2xl')
+                # ui.label('linear velocity').classes('text-xs mb-[-1.8em]')
+                # slider_props = 'readonly selection-color=transparent'
+                # self.linear_velocity = ui.slider(min=-LINEAR_VELOCITY_DEFAULT, max=LINEAR_VELOCITY_DEFAULT,
+                #                                  step=0.05, value=0).props(slider_props)
+                # ui.label('angular velocity').classes('text-xs mb-[-1.8em]')
+                # self.angular_velocity = ui.slider(min=-ANGULAR_VELOCITY_DEFAULT, max=ANGULAR_VELOCITY_DEFAULT,
+                #                                   step=0.05, value=0).props(slider_props)
+                # ui.label('position').classes('text-xs mb-[-1.4em]')  # self.position = ui.label('---')
+                with ui.column().classes('items-center'):
+                    with ui.row().classes('items-stretch'):
+                        with ui.column().classes('items-center btns'):
+                            self.power_btn = ui.button('Power', on_click=self.spot.toggle_power)
+                            self.sit_btn = ui.button('Sit', on_click=self.spot.sit)
+                            self.unstow_btn = ui.button('Unstow', on_click=self.spot.unstow)
+                            self.rec_btn = ui.button('Record', on_click=self._toggle_record)
+                        with ui.column().classes('items-center btns'):
+                            # ui.button('Lease', on_click=self.spot.toggle_lease)
+                            # ui.button('Stand', on_click=self.spot.stand)
+                            # ui.button('Stow', on_click=self.spot.stow)
+                            # ui.button('Save', on_click=self._save_autowalk)
+                            self.lease_btn = ui.button('Lease', on_click=self.spot.toggle_lease)
+                            self.stand_btn = ui.button('Stand', on_click=self.spot.stand)
+                            self.stow_btn = ui.button('Stow', on_click=self.spot.stow)
+                            self.save_btn = ui.button('Save', on_click=self._save_autowalk)
+
+                    self.estop_btn = ui.button('estop', on_click=self._toggle_estop).style(
+                        "background-color: red; color: white;").tailwind.background_color('red')
+
+                ui.query(".btns button").style("width: 100%")
+
+            with ui.card().classes('w-100'):
+                with ui.column():
+                    self.lease_label = ui.label(self._lease_str())
+                    self.power_label = ui.label(self._power_state_str())
+                    self.estop_label = ui.label(self._estop_str())
+                    self.battery_label = ui.label(self._battery_str())
+                    self.dir_text = ui.input('Directory', value=self.directory).style('width: 100%')
+                    self.walk_text = ui.input('Walk Name', value=self.walk_name).style('width: 100%')
+
+        ui.timer(0.5, self.update_strings)
+
+
+def start_recording(options):
+    """Start the recording service."""
+    RecorderGUI(options.hostname)
